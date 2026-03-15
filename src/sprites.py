@@ -146,6 +146,53 @@ def _draw_grass(seed):
     return s
 
 
+# ── dirt ───────────────────────────────────────────────────────────
+def _draw_dirt(seed):
+    s = pygame.Surface((T, T))
+    rng = random.Random(seed)
+
+    # Base earthy brown with variation
+    r_off = rng.randint(-8, 8)
+    base = (_clamp(COL_EARTH[0] + r_off),
+            _clamp(COL_EARTH[1] + r_off - 2),
+            _clamp(COL_EARTH[2] + r_off - 4))
+    s.fill(base)
+
+    # Darker earth patches (texture)
+    for _ in range(5):
+        ex = rng.randint(0, T - 1)
+        ey = rng.randint(0, T - 1)
+        er = rng.randint(3, 6)
+        dark = _lerp_color(base, COL_EARTH_DARK, 0.4)
+        pygame.draw.circle(s, _shade(dark, rng.randint(-6, 6)), (ex, ey), er)
+
+    # Lighter sandy patches
+    for _ in range(3):
+        px_x = rng.randint(2, T - 3)
+        px_y = rng.randint(2, T - 3)
+        pr = rng.randint(2, 5)
+        light = _shade(base, rng.randint(8, 18))
+        pygame.draw.circle(s, light, (px_x, px_y), pr)
+
+    # Small pebbles
+    for _ in range(4):
+        px_x = rng.randint(1, T - 2)
+        py = rng.randint(1, T - 2)
+        pcol = _lerp_color(COL_ROCK_WARM, base, 0.5)
+        _px(s, px_x, py, _shade(pcol, rng.randint(-8, 8)))
+
+    # Tiny cracks / soil lines
+    for _ in range(3):
+        cx = rng.randint(4, T - 5)
+        cy = rng.randint(4, T - 5)
+        cl = rng.randint(3, 6)
+        ccol = _shade(COL_EARTH_DARK, rng.randint(-10, 0))
+        for step in range(cl):
+            _px(s, cx + step, cy + rng.randint(-1, 1), ccol)
+
+    return s
+
+
 # ── tree ───────────────────────────────────────────────────────────
 def _draw_tree(damaged_level=0):
     s = pygame.Surface((T, T), pygame.SRCALPHA)
@@ -640,6 +687,10 @@ def create_tile_sprites():
     # Grass variants
     for i in range(20):
         tiles[f"grass_{i}"] = _draw_grass(i * 7 + 3)
+
+    # Dirt variants
+    for i in range(8):
+        tiles[f"dirt_{i}"] = _draw_dirt(i * 11 + 5)
 
     # Tree (full + damage states)
     tiles["tree"] = _draw_tree(0)

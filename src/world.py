@@ -6,7 +6,7 @@ from src.settings import (
     BLOCKING_TILES, WILD_TILES,
     TILE_GRASS, TILE_TREE, TILE_ROCK,
     TILE_BERRY, TILE_CAMPFIRE, TILE_BORDER, TILE_WATER,
-    TILE_BED, TILE_TILLED, TILE_CHEST,
+    TILE_BED, TILE_TILLED, TILE_CHEST, TILE_DIRT,
     TILE_WILD_MORA, TILE_WILD_POTATO, TILE_WILD_WHEAT, TILE_WILD_PUMPKIN,
     WILD_TILE_TO_CROP, CROPS, CHEST_SLOTS,
     INTERNAL_WIDTH, INTERNAL_HEIGHT, RESOURCE_HP,
@@ -87,7 +87,16 @@ def generate_map(seed=2024, num_players=1):
                 if 1 <= lx < MAP_WIDTH - 1 and 1 <= ly < MAP_HEIGHT - 1:
                     tilemap[ly][lx] = TILE_WATER
 
-    # 5) Campfire + beds around it
+    # 5) Dirt zone near the lake (10×10, just west of the lake)
+    dirt_x0 = lake_cx - 13
+    dirt_y0 = lake_cy - 4
+    for dy in range(10):
+        for dx in range(10):
+            dx2, dy2 = dirt_x0 + dx, dirt_y0 + dy
+            if 1 <= dx2 < MAP_WIDTH - 1 and 1 <= dy2 < MAP_HEIGHT - 1:
+                tilemap[dy2][dx2] = TILE_DIRT
+
+    # 6) Campfire + beds around it
     center_x = MAP_WIDTH // 2
     center_y = MAP_HEIGHT // 2
     tilemap[center_y][center_x] = TILE_CAMPFIRE
@@ -153,11 +162,9 @@ class World:
         return fx0 <= tx < fx0 + FARM_WIDTH and fy0 <= ty < fy0 + FARM_HEIGHT
 
     def till_soil(self, tx, ty):
-        """Convert grass to tilled soil. Returns True if successful."""
-        if not self.is_farm_area(tx, ty):
-            return False
+        """Convert dirt to tilled soil. Returns True if successful."""
         tile = self.tilemap[ty][tx]
-        if tile != TILE_GRASS:
+        if tile != TILE_DIRT:
             return False
         self.tilemap[ty][tx] = TILE_TILLED
         return True
@@ -239,12 +246,16 @@ class World:
             for tx in range(start_tx, end_tx):
                 sx, sy = cam.world_to_screen(tx * TILE_SIZE, ty * TILE_SIZE)
 
-                # Grass base
-                grass_key = f"grass_{(tx * 7 + ty * 13) % 20}"
-                surface.blit(self.tile_sprites[grass_key], (sx, sy))
-
                 tile = self.tilemap[ty][tx]
                 original = self.base_map[ty][tx]
+
+                # Ground base layer
+                if tile == TILE_DIRT or original == TILE_DIRT:
+                    dirt_key = f"dirt_{(tx * 5 + ty * 11) % 8}"
+                    surface.blit(self.tile_sprites[dirt_key], (sx, sy))
+                else:
+                    grass_key = f"grass_{(tx * 7 + ty * 13) % 20}"
+                    surface.blit(self.tile_sprites[grass_key], (sx, sy))
 
                 if tile == TILE_TREE:
                     hp = self.resource_hp.get((tx, ty), RESOURCE_HP)

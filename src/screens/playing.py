@@ -4,7 +4,7 @@ from src.settings import (
     COL_BG, COL_UI_TEXT, COL_UI_HIGHLIGHT, COL_UI_BG, COL_UI_SELECTED,
     PLAYER_MAX_ENERGY, FACING_DOWN, FACING_UP, FACING_LEFT, FACING_RIGHT,
     TILE_GRASS, TILE_TREE, TILE_ROCK, TILE_BERRY, TILE_TILLED, TILE_CHEST,
-    TILE_WATER, TILE_BED, WILD_TILES,
+    TILE_WATER, TILE_BED, TILE_DIRT, WILD_TILES,
     TOOL_STONE, TOOL_HOE, TOOL_WATER_BUCKET,
     ENERGY_COST_HIT, ENERGY_COST_PICK, ENERGY_COST_TILL_STONE, ENERGY_COST_TILL_HOE,
     ENERGY_COST_WATER, ENERGY_COST_PLANT, ENERGY_COST_HARVEST,
@@ -349,8 +349,8 @@ class PlayingScreen:
             tool = self.tool_manager.current
 
             if tool == TOOL_STONE:
-                # Till grass in farm area
-                if tile == TILE_GRASS and self.world.is_farm_area(tx, ty):
+                # Till dirt
+                if tile == TILE_DIRT:
                     if self.player.energy < ENERGY_COST_TILL_STONE:
                         self.hud.add_message(t("msg_no_energy"), 2.0)
                         return
@@ -383,7 +383,7 @@ class PlayingScreen:
 
             if tool == TOOL_HOE:
                 # Hoe ONLY tills — no hitting trees/rocks
-                if tile == TILE_GRASS and self.world.is_farm_area(tx, ty):
+                if tile == TILE_DIRT:
                     if self.player.energy < ENERGY_COST_TILL_HOE:
                         self.hud.add_message(t("msg_no_energy"), 2.0)
                         return
@@ -547,8 +547,7 @@ class PlayingScreen:
         tilled = 0
         for step in range(1, HOLD_EXTRA_TILES + 1):
             ntx, nty = tx + fdx * step, ty + fdy * step
-            if (self.world.is_farm_area(ntx, nty)
-                    and self.world.get_tile(ntx, nty) == TILE_GRASS
+            if (self.world.get_tile(ntx, nty) == TILE_DIRT
                     and self.player.energy >= ENERGY_COST_TILL_HOE):
                 if self.world.till_soil(ntx, nty):
                     self.player.energy -= ENERGY_COST_TILL_HOE
