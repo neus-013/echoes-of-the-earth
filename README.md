@@ -1,4 +1,4 @@
-# Albada 🌄
+# Echoes of the Earth 🌍
 
 Joc de supervivència, granja i exploració ambientat en una prehistòria fantàstica. Desenvolupat en **Python + Pygame**, en **català**.
 
@@ -9,6 +9,7 @@ Joc de supervivència, granja i exploració ambientat en una prehistòria fantà
 ## Què hi ha implementat?
 
 ### Fase 0 — MVP base
+
 - Mapa procedural 60×60 tiles (herba, aigua, arbres, roques, sorra)
 - Jugador amb moviment en 4 direccions i animació de caminar
 - Col·lisions amb el terreny
@@ -17,6 +18,7 @@ Joc de supervivència, granja i exploració ambientat en una prehistòria fantà
 - Anar a dormir per avançar el dia
 
 ### Fase 1 — Agricultura i Artesania
+
 - Llaurar terra, plantar llavors, regar cultius i collir
 - Bota d'aigua amb capacitat limitada (reomplir al riu)
 - Inventari amb llavors i productes recol·lectats
@@ -24,6 +26,7 @@ Joc de supervivència, granja i exploració ambientat en una prehistòria fantà
 - Resum de fi de dia amb producció obtinguda
 
 ### Multijugador (LAN)
+
 - Creació i unió a partides per codi de 5 caràcters
 - Fins a 4 jugadors simultanis a la mateixa xarxa local (WiFi/LAN)
 - Descobriment automàtic del host via UDP
@@ -46,8 +49,8 @@ Joc de supervivència, granja i exploració ambientat en una prehistòria fantà
 ### 1. Clonar el repositori
 
 ```bash
-git clone https://github.com/neus-013/albada.git
-cd albada
+git clone https://github.com/neus-013/echoes-of-the-earth.git
+cd echoes-of-the-earth
 ```
 
 ### 2. Crear entorn virtual i instal·lar dependències
@@ -87,7 +90,7 @@ El multijugador funciona entre dispositius connectats a la **mateixa xarxa local
 ## Estructura del projecte
 
 ```
-albada/
+echoes-of-the-earth/
 ├── assets/          # Sprites i recursos gràfics
 ├── data/
 │   └── i18n/        # Fitxers de traducció (ca.json)

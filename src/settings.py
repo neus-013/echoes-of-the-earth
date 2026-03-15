@@ -1,7 +1,7 @@
 import pygame
 
 # Display
-GAME_TITLE = "Albada"
+GAME_TITLE = "Echoes of the Earth"
 INTERNAL_WIDTH = 640
 INTERNAL_HEIGHT = 360
 TILE_SIZE = 32

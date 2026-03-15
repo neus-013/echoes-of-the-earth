@@ -1,5 +1,5 @@
 {
-  "game_title": "ALBADA",
+  "game_title": "ECHOES OF THE EARTH",
 
   "menu_new_game": "Crear Partida",
   "menu_load_game": "Jugar",
@@ -157,7 +157,7 @@
   "msg_all_must_connect": "Tots els jugadors han d'estar connectats.",
   "msg_disconnected": "S'ha perdut la connexió.",
 
-  "profile_title": "Benvingut a Albada!",
+  "profile_title": "Benvingut a Echoes of the Earth!",
   "profile_enter_name": "Com et dius?",
   "profile_confirm": "Continuar",
 

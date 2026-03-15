@@ -1,5 +1,5 @@
 """
-Multiplayer networking module for Albada.
+Multiplayer networking module for Echoes of the Earth.
 
 Uses TCP sockets with length-prefixed JSON messages.
 Server runs on the host; clients connect to join.
