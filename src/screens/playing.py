@@ -2,7 +2,7 @@ import pygame
 from src.settings import (
     INTERNAL_WIDTH, INTERNAL_HEIGHT, TILE_SIZE,
     COL_BG, COL_UI_TEXT, COL_UI_HIGHLIGHT, COL_UI_BG, COL_UI_SELECTED,
-    PLAYER_MAX_ENERGY, FACING_DOWN,
+    PLAYER_MAX_ENERGY, FACING_DOWN, FACING_OFFSETS,
     TILE_GRASS, TILE_TREE, TILE_ROCK, TILE_BERRY, TILE_TILLED, TILE_CHEST,
     TILE_WATER, TILE_BED, TILE_DIRT, TILE_WATERED, WILD_TILES,
     TOOL_STONE, TOOL_HOE, TOOL_WATER_BUCKET, TOOL_WATER_BARREL,
@@ -24,6 +24,16 @@ from src.systems.inventory import Inventory
 from src.systems.tools import ToolManager
 from src.systems.farming import FarmingSystem
 from src.systems.crafting import can_craft, do_craft
+
+# Rang màxim d'acció en tiles (distància Chebyshev jugador → tile clicat)
+_ACTION_RANGE = 2
+
+
+def _in_range(player, tx, ty):
+    """Retorna True si el tile (tx,ty) està dins del rang d'acció del jugador."""
+    dx = abs(player.tile_x - tx)
+    dy = abs(player.tile_y - ty)
+    return max(dx, dy) <= _ACTION_RANGE
 
 
 class PlayingScreen:
@@ -63,7 +73,7 @@ class PlayingScreen:
         self.chest_slot_rects = []
         self.chest_inv_rects = []
 
-        # Seed selector overlay
+        # Selector de llavors
         self.seed_select_open = False
         self.seed_select_pos = None
         self.seed_options = []
@@ -113,7 +123,6 @@ class PlayingScreen:
         else:
             self._init_solo(data)
 
-        # Farming
         self.farming = FarmingSystem(world=self.world)
         self.farming.from_save_data(data.get("farming_data"))
         self.planted_types = set(data.get("planted_types", []))
@@ -189,14 +198,11 @@ class PlayingScreen:
 
         if event.type == pygame.KEYDOWN:
             self._handle_keydown(event)
-
         elif event.type == pygame.MOUSEBUTTONDOWN:
             self._handle_mousedown(event)
-
         elif event.type == pygame.MOUSEBUTTONUP:
             if event.button == 1:
                 self.hold_info = None
-
         elif event.type == pygame.MOUSEMOTION:
             if self.paused:
                 mx, my = self._to_internal(event.pos)
@@ -263,11 +269,13 @@ class PlayingScreen:
                         return
                 return
 
+            # Clic al slot d'eina → activa l'eina
             if self.hud.tool_slot_rect and self.hud.tool_slot_rect.collidepoint(mx, my):
                 self.tool_manager.active = True
                 self.inventory.selected_slot = -1
                 return
 
+            # Clic a la barra d'inventari → selecciona slot
             if self.hud.toolbar_rects:
                 vis_start, _ = self.inventory.get_visible_range()
                 for i, rect in enumerate(self.hud.toolbar_rects):
@@ -280,12 +288,14 @@ class PlayingScreen:
                             self.tool_manager.active = False
                         return
 
+            # Botó de crafting
             if self.hud.craft_button_rect and self.hud.craft_button_rect.collidepoint(mx, my):
                 self.crafting_open = True
                 return
 
+            # Clic al món
             if self.interact_cooldown <= 0:
-                self._handle_world_click(mx, my, event)
+                self._handle_world_click(mx, my)
 
         elif event.button in (4, 5):
             direction = -1 if event.button == 4 else 1
@@ -297,20 +307,25 @@ class PlayingScreen:
     def _to_internal(self, pos):
         return self.game.screen_to_internal(pos[0], pos[1])
 
-    def _handle_world_click(self, mx, my, event=None):
+    def _handle_world_click(self, mx, my):
         tx = int(mx // TILE_SIZE)
         ty = int(my // TILE_SIZE)
-        self._do_tile_action(tx, ty, event)
+        self._do_tile_action(tx, ty)
 
     # ── Accions sobre tiles ──────────────────────────────────────
 
-    def _do_tile_action(self, tx, ty, event=None):
+    def _do_tile_action(self, tx, ty):
         if tx < 0 or ty < 0 or tx >= MAP_WIDTH or ty >= MAP_HEIGHT:
+            return
+
+        # Comprovació de rang d'acció
+        if not _in_range(self.player, tx, ty):
             return
 
         tile = self.world.get_tile(tx, ty)
 
-        # Context-free interactions
+        # ── Interaccions sense eina ──────────────────────────────
+
         if tile == TILE_BED:
             self.sleep_prompt = True
             return
@@ -320,120 +335,147 @@ class PlayingScreen:
             self.chest_open = True
             return
 
-        # Wild crop interaction (no tool needed)
         if tile in WILD_TILES:
             self._try_harvest_wild(tx, ty)
             return
 
-        # Tilled/watered: planting (inventory seed selected) or harvest if mature
+        # ── Terra llaurada: plantar o collir ─────────────────────
+
         if tile in (TILE_TILLED, TILE_WATERED):
-            # Harvest if crop is mature
             if self.farming.is_mature(tx, ty):
                 self._try_harvest_crop(tx, ty)
-                return
-            # Plant if seed selected in inventory
-            seeds = self.inventory.get_seeds()
-            if seeds and self.inventory.selected_slot >= 0:
-                selected = self.inventory.get_selected_item()
-                if selected and selected["item"] in ALL_SEED_ITEMS:
-                    self._try_plant(tx, ty, selected["item"])
-                    return
-            # Multiple seeds: open selector
-            if len(seeds) > 1:
-                self.seed_options = seeds
-                self.seed_select_pos = (tx, ty)
-                self.seed_select_open = True
-                return
-            elif len(seeds) == 1:
-                self._try_plant(tx, ty, seeds[0])
-                return
+            else:
+                self._try_plant_on_tile(tx, ty)
             return
 
-        # Tool-specific actions
+        # ── Accions amb eina activa ──────────────────────────────
+
         if not self.tool_manager.active:
             return
 
         tool = self.tool_manager.current
 
-        if tool in (TOOL_STONE, TOOL_AXE):
-            self._action_hit_or_till(tool, tile, tx, ty)
-
+        if self.tool_manager.is_water_tool(tool):
+            self._action_water(tool, tile, tx, ty)
         elif tool == TOOL_HOE:
-            if tile == TILE_DIRT:
-                self._action_till_hoe(tx, ty)
+            self._action_till_hoe(tile, tx, ty)
+        else:
+            # Eines de cop: pedra, destral, martell
+            self._action_hit(tool, tile, tx, ty)
 
-        elif tool in (TOOL_WATER_BUCKET, TOOL_WATER_BARREL):
-            self._action_water(tile, tx, ty)
+    # ── Plantar ──────────────────────────────────────────────────
 
-        elif tool == TOOL_HAMMER:
-            if tile == TILE_ROCK:
-                self._action_hit_rock(tool, tx, ty)
+    def _try_plant_on_tile(self, tx, ty):
+        """Intenta plantar al tile. Obre selector si cal."""
+        seeds = self.inventory.get_seeds()
 
-    def _action_hit_or_till(self, tool, tile, tx, ty):
-        if tile == TILE_DIRT:
-            if self.player.energy < ENERGY_COST_TILL_STONE:
-                self.hud.add_message(t("msg_no_energy"), 2.0)
-                return
-            if self.world.till_soil(tx, ty):
-                self.player.energy -= ENERGY_COST_TILL_STONE
-                self.hud.add_message(t("msg_tilled"), 1.0)
+        if not seeds:
+            return  # No tenim llavors, silenci (el tile simplement no reacciona)
+
+        # Si hi ha un seed seleccionat explícitament a l'inventari, usem aquell
+        selected = self.inventory.get_selected_item()
+        if selected and selected["item"] in ALL_SEED_ITEMS:
+            self._try_plant(tx, ty, selected["item"])
             return
 
-        if tile in (TILE_TREE, TILE_ROCK):
-            if self.player.energy < ENERGY_COST_HIT:
-                self.hud.add_message(t("msg_no_energy"), 2.0)
-                return
-            result = self.world.hit_resource(tx, ty, tool_id=tool)
-            self.player.energy -= ENERGY_COST_HIT
-            self.player.flash_timer = 0.1
-            self._process_hit_result(result, tx, ty)
+        # Només un tipus de llavor → planta directament
+        if len(seeds) == 1:
+            self._try_plant(tx, ty, seeds[0])
+            return
 
-        if tile == TILE_BERRY:
-            self._try_pick_berries(tx, ty)
+        # Múltiples llavors → obre selector
+        self.seed_options = seeds
+        self.seed_select_pos = (tx, ty)
+        self.seed_select_open = True
 
-    def _action_till_hoe(self, tx, ty):
-        if self.player.energy < ENERGY_COST_TILL_HOE:
+    def _try_plant(self, tx, ty, seed_item):
+        if self.player.energy < ENERGY_COST_PLANT:
             self.hud.add_message(t("msg_no_energy"), 2.0)
             return
-        if self.world.till_soil(tx, ty):
-            self.player.energy -= ENERGY_COST_TILL_HOE
-            self.hud.add_message(t("msg_tilled"), 1.0)
-            self.hold_info = {"tx": tx, "ty": ty, "timer": 0.0, "type": "hoe", "done": False}
+        if self.inventory.count_item(seed_item) <= 0:
+            self.hud.add_message(t("msg_need_seeds"), 2.0)
+            return
+        if self.farming.plant(tx, ty, seed_item):
+            self.inventory.remove_item(seed_item, 1)
+            self.player.energy -= ENERGY_COST_PLANT
+            crop_id = SEED_TO_CROP.get(seed_item)
+            crop_name = t(f"crop_{crop_id}") if crop_id else seed_item
+            self.hud.add_message(f"{t('msg_planted')} {crop_name}", 1.5)
+            if crop_id and crop_id not in self.planted_types:
+                self.planted_types.add(crop_id)
+                self.daily_pg += PG_FIRST_PLANT
+        self.interact_cooldown = 0.3
 
-    def _action_water(self, tile, tx, ty):
-        if tile == TILE_WATER:
-            filled = self.tool_manager.fill_water()
-            msg = t("msg_water_filled") if filled > 0 else t("msg_water_full")
-            self.hud.add_message(msg, 1.5)
+    # ── Collita ──────────────────────────────────────────────────
+
+    def _try_harvest_crop(self, tx, ty):
+        if self.player.energy < ENERGY_COST_HARVEST:
+            self.hud.add_message(t("msg_no_energy"), 2.0)
+            return
+        result = self.farming.harvest(tx, ty)
+        if result:
+            item_id, qty, quality, pg = result
+            if self.inventory.can_add(item_id, quality):
+                self.inventory.add_item(item_id, qty, quality)
+                self.player.energy -= ENERGY_COST_HARVEST
+                self.hud.add_message(f"{t('msg_harvested')} +{qty} {t(f'item_{item_id}')}", 1.5)
+                self.daily_items[item_id] = self.daily_items.get(item_id, 0) + qty
+                self.daily_pg += pg
+            else:
+                self.hud.add_message(t("msg_inventory_full"), 2.0)
+        self.interact_cooldown = 0.3
+
+    def _try_harvest_wild(self, tx, ty):
+        result = self.world.harvest_wild(tx, ty)
+        if result:
+            seed_item, qty = result
+            if self.inventory.can_add(seed_item):
+                self.inventory.add_item(seed_item, qty)
+                self.hud.add_message(f"+{qty} {t(f'item_{seed_item}')}", 1.5)
+                self.daily_items[seed_item] = self.daily_items.get(seed_item, 0) + qty
+            else:
+                self.hud.add_message(t("msg_inventory_full"), 2.0)
+
+    # ── Eines de cop (pedra, destral, martell) ───────────────────
+
+    def _action_hit(self, tool, tile, tx, ty):
+        """Gestiona cops d'eines. Comprova capacitats i dona feedback si no pot."""
+
+        # Arbre
+        if tile == TILE_TREE:
+            if not self.tool_manager.can_break_tree(tool):
+                self.hud.add_message(t("msg_wrong_tool"), 1.5)
+                return
+            self._do_hit_resource(tool, tx, ty)
             return
 
-        if tile == TILE_TILLED:
-            if self.tool_manager.get_water() <= 0:
-                self.hud.add_message(t("msg_water_empty"), 1.5)
+        # Roca
+        if tile == TILE_ROCK:
+            if not self.tool_manager.can_break_rock(tool):
+                self.hud.add_message(t("msg_wrong_tool"), 1.5)
                 return
-            if self.player.energy < ENERGY_COST_WATER:
-                self.hud.add_message(t("msg_no_energy"), 2.0)
-                return
-            if self.world.water_soil(tx, ty):
-                self.tool_manager.use_water()
-                self.player.energy -= ENERGY_COST_WATER
-                # Mark crop as watered in farming system
-                plot = self.farming.get_crop(tx, ty)
-                if plot:
-                    plot["watered"] = True
-                self.hud.add_message(t("msg_watered"), 1.0)
-                self.hold_info = {"tx": tx, "ty": ty, "timer": 0.0, "type": "water", "done": False}
+            self._do_hit_resource(tool, tx, ty)
+            return
 
-    def _action_hit_rock(self, tool, tx, ty):
+        # Baies (qualsevol eina pot recol·lectar)
+        if tile == TILE_BERRY:
+            self._try_pick_berries(tx, ty)
+            return
+
+        # Terra llaurada amb pedra
+        if tile == TILE_DIRT:
+            if not self.tool_manager.can_till(tool):
+                self.hud.add_message(t("msg_wrong_tool"), 1.5)
+                return
+            self._do_till(tx, ty, ENERGY_COST_TILL_STONE)
+
+    def _do_hit_resource(self, tool, tx, ty):
         if self.player.energy < ENERGY_COST_HIT:
             self.hud.add_message(t("msg_no_energy"), 2.0)
             return
         result = self.world.hit_resource(tx, ty, tool_id=tool)
         self.player.energy -= ENERGY_COST_HIT
         self.player.flash_timer = 0.1
-        self._process_hit_result(result, tx, ty)
-
-    def _process_hit_result(self, result, tx, ty):
         if result:
             item_id, qty, _ = result
             if self.inventory.can_add(item_id):
@@ -458,66 +500,138 @@ class PlayingScreen:
                 self.player.energy -= ENERGY_COST_PICK
                 self.hud.add_message(f"+{qty} {t(f'item_{item_id}')}", 1.5)
                 self.daily_items[item_id] = self.daily_items.get(item_id, 0) + qty
-
-    def _try_harvest_wild(self, tx, ty):
-        result = self.world.harvest_wild(tx, ty)
-        if result:
-            seed_item, qty = result
-            if self.inventory.can_add(seed_item):
-                self.inventory.add_item(seed_item, qty)
-                self.hud.add_message(f"+{qty} {t(f'item_{seed_item}')}", 1.5)
-                self.daily_items[seed_item] = self.daily_items.get(seed_item, 0) + qty
             else:
                 self.hud.add_message(t("msg_inventory_full"), 2.0)
 
-    def _try_plant(self, tx, ty, seed_item):
-        if self.player.energy < ENERGY_COST_PLANT:
-            self.hud.add_message(t("msg_no_energy"), 2.0)
-            return
-        if self.inventory.count_item(seed_item) <= 0:
-            self.hud.add_message(t("msg_need_seeds"), 2.0)
-            return
-        if self.farming.plant(tx, ty, seed_item):
-            self.inventory.remove_item(seed_item, 1)
-            self.player.energy -= ENERGY_COST_PLANT
-            crop_id = SEED_TO_CROP.get(seed_item)
-            crop_name = t(f"crop_{crop_id}") if crop_id else seed_item
-            self.hud.add_message(f"{t('msg_planted')} {crop_name}", 1.5)
-            # First-plant bonus
-            if crop_id and crop_id not in self.planted_types:
-                self.planted_types.add(crop_id)
-                self.daily_pg += PG_FIRST_PLANT
-        self.interact_cooldown = 0.3
+    # ── Aixada ───────────────────────────────────────────────────
 
-    def _try_harvest_crop(self, tx, ty):
-        if self.player.energy < ENERGY_COST_HARVEST:
+    def _action_till_hoe(self, tile, tx, ty):
+        if tile != TILE_DIRT:
+            if tile == TILE_TREE or tile == TILE_ROCK:
+                self.hud.add_message(t("msg_wrong_tool"), 1.5)
+            return
+        self._do_till(tx, ty, ENERGY_COST_TILL_HOE)
+        if self.world.get_tile(tx, ty) == TILE_TILLED:
+            # Inicia hold per llaurar fins a 2 tiles més en la direcció del jugador
+            self.hold_info = {
+                "tx": tx, "ty": ty,
+                "timer": 0.0, "type": "hoe", "done": False,
+            }
+
+    def _do_till(self, tx, ty, energy_cost):
+        if self.player.energy < energy_cost:
             self.hud.add_message(t("msg_no_energy"), 2.0)
             return
-        result = self.farming.harvest(tx, ty)
-        if result:
-            item_id, qty, quality, pg = result
-            if self.inventory.can_add(item_id, quality):
-                self.inventory.add_item(item_id, qty, quality)
-                self.player.energy -= ENERGY_COST_HARVEST
-                self.hud.add_message(f"{t('msg_harvested')} +{qty} {t(f'item_{item_id}')}", 1.5)
-                self.daily_items[item_id] = self.daily_items.get(item_id, 0) + qty
-                self.daily_pg += pg
-            else:
-                self.hud.add_message(t("msg_inventory_full"), 2.0)
-        self.interact_cooldown = 0.3
+        if self.world.till_soil(tx, ty):
+            self.player.energy -= energy_cost
+            self.hud.add_message(t("msg_tilled"), 1.0)
+
+    # ── Eines d'aigua ────────────────────────────────────────────
+
+    def _action_water(self, tool, tile, tx, ty):
+        # Omplir al riu
+        if tile == TILE_WATER:
+            filled = self.tool_manager.fill_water(tool)
+            self.hud.add_message(
+                t("msg_water_filled") if filled > 0 else t("msg_water_full"), 1.5
+            )
+            return
+
+        # Regar terra llaurada
+        if tile == TILE_TILLED:
+            if self.tool_manager.get_water(tool) <= 0:
+                self.hud.add_message(t("msg_water_empty"), 1.5)
+                return
+            if self.player.energy < ENERGY_COST_WATER:
+                self.hud.add_message(t("msg_no_energy"), 2.0)
+                return
+            self._do_water_tile(tool, tx, ty)
+            # Inicia hold per regar tiles addicionals si la galleda ho permet
+            if self.tool_manager.get_water_tiles(tool) > 1:
+                self.hold_info = {
+                    "tx": tx, "ty": ty,
+                    "timer": 0.0, "type": "water", "done": False,
+                    "tool": tool,
+                }
+            return
+
+        # Feedback si cliques res útil
+        if tile not in (TILE_GRASS, TILE_DIRT, TILE_BORDER):
+            self.hud.add_message(t("msg_wrong_tool"), 1.5)
+
+    def _do_water_tile(self, tool, tx, ty):
+        """Rega un tile concret i marca el cultiu com a regat."""
+        if self.world.water_soil(tx, ty):
+            self.tool_manager.use_water(tool_id=tool)
+            self.player.energy -= ENERGY_COST_WATER
+            plot = self.farming.get_crop(tx, ty)
+            if plot:
+                plot["watered"] = True
+            self.hud.add_message(t("msg_watered"), 1.0)
+
+    # ── Hold: llaurar / regar tiles addicionals ──────────────────
+
+    def _update_hold(self, dt):
+        if not self.hold_info or self.hold_info["done"]:
+            return
+        if pygame.mouse.get_pressed()[0]:
+            self.hold_info["timer"] += dt
+            if self.hold_info["timer"] >= 0.3:
+                hx, hy = self.hold_info["tx"], self.hold_info["ty"]
+                if self.hold_info["type"] == "hoe":
+                    self._hold_extra_hoe(hx, hy)
+                elif self.hold_info["type"] == "water":
+                    self._hold_extra_water(hx, hy, self.hold_info.get("tool"))
+                self.hold_info["done"] = True
+        else:
+            self.hold_info = None
+
+    def _hold_extra_hoe(self, start_tx, start_ty):
+        """
+        Llaurar fins a 2 tiles més en la direcció del jugador.
+        Resultat: tile clicat + 2 tiles endavant = màxim 3 tiles en línia.
+        """
+        ox, oy = FACING_OFFSETS[self.player.facing]
+        for i in range(1, 3):  # tiles +1 i +2 en la direcció
+            tx, ty = start_tx + ox * i, start_ty + oy * i
+            if self.world.get_tile(tx, ty) == TILE_DIRT:
+                if self.player.energy >= ENERGY_COST_TILL_HOE:
+                    self._do_till(tx, ty, ENERGY_COST_TILL_HOE)
+                else:
+                    break  # sense energia, parem
+
+    def _hold_extra_water(self, start_tx, start_ty, tool):
+        """
+        Regar 1 tile a cada costat del tile clicat, perpendicular a la direcció.
+        Resultat: tile clicat + esquerra + dreta = 3 tiles en forma de ─.
+        """
+        if tool is None:
+            tool = self.tool_manager.current
+        ox, oy = FACING_OFFSETS[self.player.facing]
+        # Perpendicular: si la direcció és N/S, els laterals són E/W i viceversa
+        perp_x, perp_y = oy, ox  # rotació 90°
+
+        for side in (-1, 1):
+            tx = start_tx + perp_x * side
+            ty = start_ty + perp_y * side
+            if self.world.get_tile(tx, ty) == TILE_TILLED:
+                if (self.tool_manager.get_water(tool) > 0
+                        and self.player.energy >= ENERGY_COST_WATER):
+                    self._do_water_tile(tool, tx, ty)
+
+    # ── Menjar ───────────────────────────────────────────────────
 
     def _try_eat_selected(self):
         selected = self.inventory.get_selected_item()
         if not selected:
             return
-        item_id = selected["item"]
-        restore = EDIBLE_ITEMS.get(item_id)
+        restore = EDIBLE_ITEMS.get(selected["item"])
         if restore is None:
             self.hud.add_message(t("msg_cant_eat"), 1.5)
             return
-        self.player.eat_food(self.inventory, item_id, restore)
+        self.player.eat_food(self.inventory, selected["item"], restore)
 
-    # ── Seed selector overlay ────────────────────────────────────
+    # ── Selector de llavors ──────────────────────────────────────
 
     def _handle_seed_select_event(self, event):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
@@ -539,15 +653,19 @@ class PlayingScreen:
         cx = INTERNAL_WIDTH // 2
         cy = INTERNAL_HEIGHT // 2
         item_h = 24
-        box_w, box_h = 180, 30 + len(self.seed_options) * item_h
-        pygame.draw.rect(surface, COL_UI_BG, (cx - box_w // 2, cy - box_h // 2, box_w, box_h))
-        pygame.draw.rect(surface, COL_UI_SELECTED, (cx - box_w // 2, cy - box_h // 2, box_w, box_h), 1)
-        draw_text(surface, t("seed_select"), cx, cy - box_h // 2 + 6,
+        box_w = 180
+        box_h = 30 + len(self.seed_options) * item_h
+        bx, by = cx - box_w // 2, cy - box_h // 2
+
+        pygame.draw.rect(surface, COL_UI_BG, (bx, by, box_w, box_h))
+        pygame.draw.rect(surface, COL_UI_SELECTED, (bx, by, box_w, box_h), 1)
+        draw_text(surface, t("seed_select"), cx, by + 6,
                   self.font_tiny, COL_UI_HIGHLIGHT, center=True)
+
         self.seed_rects = []
         for i, seed_id in enumerate(self.seed_options):
-            ry = cy - box_h // 2 + 22 + i * item_h
-            rect = pygame.Rect(cx - box_w // 2 + 4, ry, box_w - 8, item_h - 2)
+            ry = by + 22 + i * item_h
+            rect = pygame.Rect(bx + 4, ry, box_w - 8, item_h - 2)
             pygame.draw.rect(surface, (60, 50, 38), rect)
             self.seed_rects.append(rect)
             icon = _get_item_icon(seed_id)
@@ -574,8 +692,9 @@ class PlayingScreen:
             if rect and rect.collidepoint(mx, my):
                 if chest[i]:
                     slot = chest[i]
-                    if self.inventory.can_add(slot["item"], slot.get("quality", 0)):
-                        self.inventory.add_item(slot["item"], slot["qty"], slot.get("quality", 0))
+                    q = slot.get("quality", 0)
+                    if self.inventory.can_add(slot["item"], q):
+                        self.inventory.add_item(slot["item"], slot["qty"], q)
                         chest[i] = None
                     else:
                         self.hud.add_message(t("msg_inventory_full"), 1.5)
@@ -669,13 +788,21 @@ class PlayingScreen:
                 recipe = CRAFTING_RECIPES[i]
                 if can_craft(recipe, self.inventory):
                     if do_craft(recipe, self.inventory, self.tool_manager):
-                        name = t(f"craft_{recipe['id'].replace('craft_', '')}")
-                        self.hud.add_message(f"{t('msg_crafted')} {name}", 2.0)
+                        name_key = recipe.get("name_key", "")
+                        self.hud.add_message(f"{t('msg_crafted')} {t(name_key)}", 2.0)
+                        # Seleccionar l'eina nova automàticament
+                        if recipe["result_type"] == "tool":
+                            tool_id = recipe["result"]
+                            if self.tool_manager.has_tool(tool_id):
+                                try:
+                                    self.tool_manager.selected = self.tool_manager.tools.index(tool_id)
+                                    self.tool_manager.active = True
+                                except ValueError:
+                                    pass
                     self.crafting_open = False
                 else:
                     self.hud.add_message(t("msg_cant_craft"), 2.0)
                 return
-        # Click outside closes
         self.crafting_open = False
 
     def _draw_crafting(self, surface):
@@ -704,17 +831,15 @@ class PlayingScreen:
             pygame.draw.rect(surface, col, rect, 1)
             self.craft_rects.append(rect)
 
-            name_key = recipe.get("name_key", recipe["id"])
-            draw_text(surface, t(name_key), rect.x + 6, rect.y + 4,
-                      self.font_tiny, col)
+            draw_text(surface, t(recipe.get("name_key", "")),
+                      rect.x + 6, rect.y + 4, self.font_tiny, col)
 
-            # Ingredients summary
-            parts = []
-            for item_id, qty in recipe["ingredients"].items():
-                have = self.inventory.count_item(item_id)
-                parts.append(f"{t(f'item_{item_id}')} {have}/{qty}")
-            draw_text(surface, "  ".join(parts), rect.x + 6, rect.y + 18,
-                      self.font_tiny, (160, 150, 130))
+            parts = [
+                f"{t(f'item_{iid}')} {self.inventory.count_item(iid)}/{qty}"
+                for iid, qty in recipe["ingredients"].items()
+            ]
+            draw_text(surface, "  ".join(parts),
+                      rect.x + 6, rect.y + 18, self.font_tiny, (160, 150, 130))
 
     # ── Sleep / Pause / Menu ─────────────────────────────────────
 
@@ -798,7 +923,7 @@ class PlayingScreen:
         self.time_system.update(dt)
         if self.time_system.day_over:
             if self.is_multiplayer and not self.is_host:
-                pass  # wait for host
+                pass
             elif self.is_multiplayer and self.is_host:
                 if self.server:
                     self.server.broadcast({"type": "day_over"})
@@ -824,47 +949,6 @@ class PlayingScreen:
                 if pid != self.local_player_id:
                     p.update(dt)
             self._network_update(dt)
-
-    def _update_hold(self, dt):
-        if not self.hold_info or self.hold_info["done"]:
-            return
-        if pygame.mouse.get_pressed()[0]:
-            self.hold_info["timer"] += dt
-            if self.hold_info["timer"] >= 0.3:
-                hx, hy = self.hold_info["tx"], self.hold_info["ty"]
-                if self.hold_info["type"] == "water":
-                    self._hold_extra_water(hx, hy)
-                elif self.hold_info["type"] == "hoe":
-                    self._hold_extra_hoe(hx, hy)
-                self.hold_info["done"] = True
-        else:
-            self.hold_info = None
-
-    def _hold_extra_hoe(self, start_tx, start_ty):
-        """Till extra tiles in the facing direction when holding."""
-        from src.settings import FACING_OFFSETS, HOLD_EXTRA_TILES
-        ox, oy = FACING_OFFSETS[self.player.facing]
-        for i in range(1, HOLD_EXTRA_TILES + 1):
-            tx, ty = start_tx + ox * i, start_ty + oy * i
-            if self.world.get_tile(tx, ty) == TILE_DIRT:
-                if self.player.energy >= ENERGY_COST_TILL_HOE:
-                    if self.world.till_soil(tx, ty):
-                        self.player.energy -= ENERGY_COST_TILL_HOE
-
-    def _hold_extra_water(self, start_tx, start_ty):
-        """Water extra tiles in the facing direction when holding."""
-        from src.settings import FACING_OFFSETS, HOLD_EXTRA_TILES
-        ox, oy = FACING_OFFSETS[self.player.facing]
-        for i in range(1, HOLD_EXTRA_TILES + 1):
-            tx, ty = start_tx + ox * i, start_ty + oy * i
-            if self.world.get_tile(tx, ty) == TILE_TILLED:
-                if self.tool_manager.get_water() > 0 and self.player.energy >= ENERGY_COST_WATER:
-                    if self.world.water_soil(tx, ty):
-                        self.tool_manager.use_water()
-                        self.player.energy -= ENERGY_COST_WATER
-                        plot = self.farming.get_crop(tx, ty)
-                        if plot:
-                            plot["watered"] = True
 
     # ── Network ──────────────────────────────────────────────────
 
@@ -905,7 +989,9 @@ class PlayingScreen:
                 if slot_id is not None:
                     self.sleeping_players.add(slot_id)
                     name = self.players[slot_id].name if slot_id in self.players else "?"
-                    self.hud.add_message(t("msg_player_sleeping").replace("{0}", name), 2.0)
+                    self.hud.add_message(
+                        t("msg_player_sleeping").replace("{0}", name), 2.0
+                    )
                     self._check_all_sleeping()
             elif mtype == "disconnected":
                 info = self.server.player_info.get(pid, {})
@@ -916,7 +1002,7 @@ class PlayingScreen:
     def _host_broadcast_state(self):
         if not self.server:
             return
-        state = {
+        self.server.broadcast({
             "type": "game_state",
             "time": self.time_system.current_time,
             "sleeping": list(self.sleeping_players),
@@ -930,8 +1016,7 @@ class PlayingScreen:
                 }
                 for pid, p in self.players.items()
             },
-        }
-        self.server.broadcast(state)
+        })
 
     def _client_network_poll(self):
         if not self.client:
@@ -1036,12 +1121,15 @@ class PlayingScreen:
         surface.blit(overlay, (0, 0))
         cx, cy = INTERNAL_WIDTH // 2, INTERNAL_HEIGHT // 2
         box_w, box_h = 260, 70
-        pygame.draw.rect(surface, COL_BG, (cx - box_w // 2, cy - box_h // 2, box_w, box_h))
-        pygame.draw.rect(surface, COL_UI_HIGHLIGHT, (cx - box_w // 2, cy - box_h // 2, box_w, box_h), 1)
-        draw_text(surface, t("msg_waiting_sleep"), cx, cy - 12, self.font, COL_UI_HIGHLIGHT, center=True)
+        pygame.draw.rect(surface, COL_BG,
+                         (cx - box_w // 2, cy - box_h // 2, box_w, box_h))
+        pygame.draw.rect(surface, COL_UI_HIGHLIGHT,
+                         (cx - box_w // 2, cy - box_h // 2, box_w, box_h), 1)
+        draw_text(surface, t("msg_waiting_sleep"), cx, cy - 12,
+                  self.font, COL_UI_HIGHLIGHT, center=True)
         total = len(self.players) if self.is_multiplayer else 1
-        draw_text(surface, f"{len(self.sleeping_players)}/{total}", cx, cy + 12,
-                  self.font_small, COL_UI_TEXT, center=True)
+        draw_text(surface, f"{len(self.sleeping_players)}/{total}",
+                  cx, cy + 12, self.font_small, COL_UI_TEXT, center=True)
 
     def _draw_sleep_prompt(self, surface):
         overlay = pygame.Surface((INTERNAL_WIDTH, INTERNAL_HEIGHT), pygame.SRCALPHA)
@@ -1049,12 +1137,17 @@ class PlayingScreen:
         surface.blit(overlay, (0, 0))
         cx, cy = INTERNAL_WIDTH // 2, INTERNAL_HEIGHT // 2
         box_w, box_h = 220, 90
-        pygame.draw.rect(surface, COL_BG, (cx - box_w // 2, cy - box_h // 2, box_w, box_h))
-        pygame.draw.rect(surface, COL_UI_HIGHLIGHT, (cx - box_w // 2, cy - box_h // 2, box_w, box_h), 1)
-        draw_text(surface, t("interact_sleep"), cx, cy - 22, self.font, COL_UI_HIGHLIGHT, center=True)
+        pygame.draw.rect(surface, COL_BG,
+                         (cx - box_w // 2, cy - box_h // 2, box_w, box_h))
+        pygame.draw.rect(surface, COL_UI_HIGHLIGHT,
+                         (cx - box_w // 2, cy - box_h // 2, box_w, box_h), 1)
+        draw_text(surface, t("interact_sleep"), cx, cy - 22,
+                  self.font, COL_UI_HIGHLIGHT, center=True)
         self.sleep_rects = [
-            draw_button(surface, t("interact_confirm"), cx, cy + 6, self.font_small, selected=True, center=True),
-            draw_button(surface, t("interact_cancel"), cx, cy + 28, self.font_small, selected=False, center=True),
+            draw_button(surface, t("interact_confirm"), cx, cy + 6,
+                        self.font_small, selected=True, center=True),
+            draw_button(surface, t("interact_cancel"), cx, cy + 28,
+                        self.font_small, selected=False, center=True),
         ]
 
     def _draw_pause(self, surface):
@@ -1062,12 +1155,13 @@ class PlayingScreen:
         overlay.fill((0, 0, 0, 150))
         surface.blit(overlay, (0, 0))
         cx, cy = INTERNAL_WIDTH // 2, INTERNAL_HEIGHT // 2
-        draw_text(surface, t("pause_title"), cx, cy - 40, self.font, COL_UI_HIGHLIGHT, center=True)
+        draw_text(surface, t("pause_title"), cx, cy - 40,
+                  self.font, COL_UI_HIGHLIGHT, center=True)
         self.pause_rects = [
-            draw_button(surface, t("pause_continue"), cx, cy, self.font_small,
-                        selected=(self.pause_selected == 0), center=True),
-            draw_button(surface, t("pause_exit"), cx, cy + 28, self.font_small,
-                        selected=(self.pause_selected == 1), center=True),
+            draw_button(surface, t("pause_continue"), cx, cy,
+                        self.font_small, selected=(self.pause_selected == 0), center=True),
+            draw_button(surface, t("pause_exit"), cx, cy + 28,
+                        self.font_small, selected=(self.pause_selected == 1), center=True),
         ]
 
     def _draw_disconnected(self, surface):
@@ -1075,5 +1169,7 @@ class PlayingScreen:
         overlay.fill((0, 0, 0, 180))
         surface.blit(overlay, (0, 0))
         cx, cy = INTERNAL_WIDTH // 2, INTERNAL_HEIGHT // 2
-        draw_text(surface, self.disconnected_msg, cx, cy - 12, self.font, (200, 80, 80), center=True)
-        draw_text(surface, t("pause_exit"), cx, cy + 16, self.font_small, COL_UI_HIGHLIGHT, center=True)
+        draw_text(surface, self.disconnected_msg, cx, cy - 12,
+                  self.font, (200, 80, 80), center=True)
+        draw_text(surface, t("pause_exit"), cx, cy + 16,
+                  self.font_small, COL_UI_HIGHLIGHT, center=True)

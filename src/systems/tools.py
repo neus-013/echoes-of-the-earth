@@ -4,13 +4,63 @@ from src.settings import (
     WATER_BUCKET_CAPACITY, WATER_BARREL_CAPACITY,
 )
 
+# ── Definició de capacitats per eina ────────────────────────────────
+#
+#  break_tree_hits  : cops per tallar un arbre (None = no pot)
+#  break_rock_hits  : cops per trencar una roca (None = no pot)
+#  can_till         : pot llaurar terra?
+#  water            : és una eina d'aigua?
+#  capacity         : litres d'aigua màxims
+#  water_tiles      : tiles que rega amb click llarg
+#                     (1 = només el clicat, 3 = clicat + 1 a cada costat)
+#
 TOOL_INFO = {
-    TOOL_STONE:        {"name_key": "tool_stone",        "water": False, "break_tree_hits": 5, "break_rock_hits": 5, "till": 1},
-    TOOL_HOE:          {"name_key": "tool_hoe",          "water": False, "till": 3},
-    TOOL_WATER_BARREL: {"name_key": "tool_water_barrel", "water": True,  "capacity": WATER_BARREL_CAPACITY, "water_tiles": 1},
-    TOOL_WATER_BUCKET: {"name_key": "tool_water_bucket", "water": True,  "capacity": WATER_BUCKET_CAPACITY, "water_tiles": 3},
-    TOOL_AXE:          {"name_key": "tool_axe",          "water": False, "break_tree_hits": 3},
-    TOOL_HAMMER:       {"name_key": "tool_hammer",       "water": False, "break_rock_hits": 3},
+    TOOL_STONE: {
+        "name_key":        "tool_stone",
+        "break_tree_hits": 5,
+        "break_rock_hits": 5,
+        "can_till":        True,
+        "water":           False,
+    },
+    TOOL_HOE: {
+        "name_key":        "tool_hoe",
+        "break_tree_hits": None,
+        "break_rock_hits": None,
+        "can_till":        True,
+        "water":           False,
+    },
+    TOOL_AXE: {
+        "name_key":        "tool_axe",
+        "break_tree_hits": 3,
+        "break_rock_hits": None,
+        "can_till":        False,
+        "water":           False,
+    },
+    TOOL_HAMMER: {
+        "name_key":        "tool_hammer",
+        "break_tree_hits": None,
+        "break_rock_hits": 3,
+        "can_till":        False,
+        "water":           False,
+    },
+    TOOL_WATER_BARREL: {
+        "name_key":        "tool_water_barrel",
+        "break_tree_hits": None,
+        "break_rock_hits": None,
+        "can_till":        False,
+        "water":           True,
+        "capacity":        WATER_BARREL_CAPACITY,
+        "water_tiles":     1,
+    },
+    TOOL_WATER_BUCKET: {
+        "name_key":        "tool_water_bucket",
+        "break_tree_hits": None,
+        "break_rock_hits": None,
+        "can_till":        False,
+        "water":           True,
+        "capacity":        WATER_BUCKET_CAPACITY,
+        "water_tiles":     3,
+    },
 }
 
 
@@ -34,10 +84,49 @@ class ToolManager:
             self.selected = (self.selected + direction) % len(self.tools)
             self.active = True
 
+    # ── Consultes de capacitat ───────────────────────────────────
+
+    def can_break_tree(self, tool_id=None):
+        tid = tool_id or self.current
+        return TOOL_INFO.get(tid, {}).get("break_tree_hits") is not None
+
+    def can_break_rock(self, tool_id=None):
+        tid = tool_id or self.current
+        return TOOL_INFO.get(tid, {}).get("break_rock_hits") is not None
+
+    def can_till(self, tool_id=None):
+        tid = tool_id or self.current
+        return TOOL_INFO.get(tid, {}).get("can_till", False)
+
+    def is_water_tool(self, tool_id=None):
+        tid = tool_id or self.current
+        return TOOL_INFO.get(tid, {}).get("water", False)
+
+    def get_water_tiles(self, tool_id=None):
+        """Quants tiles rega aquesta eina amb click llarg."""
+        tid = tool_id or self.current
+        return TOOL_INFO.get(tid, {}).get("water_tiles", 1)
+
+    def get_tree_hits(self, tool_id=None):
+        tid = tool_id or self.current
+        return TOOL_INFO.get(tid, {}).get("break_tree_hits", 5)
+
+    def get_rock_hits(self, tool_id=None):
+        tid = tool_id or self.current
+        return TOOL_INFO.get(tid, {}).get("break_rock_hits", 5)
+
     # ── Gestió d'eines ───────────────────────────────────────────
 
     def add_tool(self, tool_id):
-        if tool_id not in self.tools:
+        """Afegeix una eina. Si és la galleda, substitueix la bóta."""
+        if tool_id == TOOL_WATER_BUCKET and TOOL_WATER_BARREL in self.tools:
+            # Transferim l'aigua proporcionalment i substituïm al mateix índex
+            barrel_water = self.water.pop(TOOL_WATER_BARREL, 0)
+            idx = self.tools.index(TOOL_WATER_BARREL)
+            self.tools[idx] = TOOL_WATER_BUCKET
+            ratio = barrel_water / max(WATER_BARREL_CAPACITY, 1)
+            self.water[TOOL_WATER_BUCKET] = int(ratio * WATER_BUCKET_CAPACITY)
+        elif tool_id not in self.tools:
             self.tools.append(tool_id)
             info = TOOL_INFO.get(tool_id)
             if info and info.get("water"):
@@ -46,12 +135,15 @@ class ToolManager:
     def has_tool(self, tool_id):
         return tool_id in self.tools
 
-    # ── Aigua ────────────────────────────────────────────────────
+    def remove_tool(self, tool_id):
+        if tool_id in self.tools:
+            idx = self.tools.index(tool_id)
+            self.tools.pop(idx)
+            self.water.pop(tool_id, None)
+            if self.selected >= len(self.tools):
+                self.selected = max(0, len(self.tools) - 1)
 
-    def is_water_tool(self, tool_id=None):
-        tid = tool_id or self.current
-        info = TOOL_INFO.get(tid)
-        return info is not None and info.get("water", False)
+    # ── Aigua ────────────────────────────────────────────────────
 
     def get_water(self, tool_id=None):
         tid = tool_id or self.current
@@ -82,38 +174,38 @@ class ToolManager:
 
     def to_save_data(self):
         return {
-            "tools": list(self.tools),
+            "tools":    list(self.tools),
             "selected": self.selected,
-            "water": dict(self.water),
+            "water":    dict(self.water),
         }
 
     def from_save_data(self, data):
         if not data:
             return
+
         self.tools = data.get("tools", [TOOL_STONE])
         self.selected = data.get("selected", 0)
-        saved_water = data.get("water", {})
+        saved_water = dict(data.get("water", {}))
 
-        # Migració: substituir water_barrel antic per la constant correcta
-        if TOOL_WATER_BARREL in self.tools and isinstance(self.tools[0], str):
-            pass  # ja és string, correcte
-
-        # Migració de saves antics que usaven strings literals
-        _migrations = {"water_barrel": TOOL_WATER_BARREL, "stone": TOOL_STONE,
-                       "hoe": TOOL_HOE, "axe": TOOL_AXE, "hammer": TOOL_HAMMER,
-                       "water_bucket": TOOL_WATER_BUCKET}
-        self.tools = [_migrations.get(t, t) for t in self.tools]
-
-        # Migració: si hi havia water_barrel com a string literal en el water dict
+        # Migració de saves antics amb strings literals
+        _migrations = {
+            "stone":        TOOL_STONE,
+            "hoe":          TOOL_HOE,
+            "axe":          TOOL_AXE,
+            "hammer":       TOOL_HAMMER,
+            "water_barrel": TOOL_WATER_BARREL,
+            "water_bucket": TOOL_WATER_BUCKET,
+        }
+        self.tools = [_migrations.get(tid, tid) for tid in self.tools]
         for old, new in _migrations.items():
             if old in saved_water and new not in saved_water:
                 saved_water[new] = saved_water.pop(old)
 
         # Eliminar duplicats mantenint ordre
         seen = []
-        for t in self.tools:
-            if t not in seen:
-                seen.append(t)
+        for tid in self.tools:
+            if tid not in seen:
+                seen.append(tid)
         self.tools = seen
 
         # Reconstruir dict d'aigua
@@ -123,7 +215,7 @@ class ToolManager:
             if info and info.get("water"):
                 self.water[tid] = min(
                     saved_water.get(tid, 0),
-                    info["capacity"]
+                    info["capacity"],
                 )
 
         if self.selected >= len(self.tools):

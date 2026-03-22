@@ -78,6 +78,8 @@
   "tool_water_barrel": "Barril d'aigua",
   "tool_hoe": "Aixada",
   "tool_water_bucket": "Galleda d'aigua",
+  "tool_axe": "Destral",
+  "tool_hammer": "Martell",
 
   "crop_mora": "Mores",
   "crop_potato": "Patata",
@@ -103,7 +105,7 @@
   "msg_crafted": "Has fabricat:",
   "msg_cant_craft": "No tens prou materials.",
   "msg_cant_eat": "Això no es pot menjar.",
-  "msg_bucket_upgrade": "Has millorat la bota a galleda!",
+  "msg_wrong_tool": "Aquesta eina no serveix aquí.",
 
   "seed_select": "Escull llavor:",
   "craft_title": "Fabricació",
@@ -111,6 +113,8 @@
   "craft_do": "[Fabricar]",
   "craft_hoe": "Aixada",
   "craft_water_bucket": "Galleda d'aigua",
+  "craft_axe": "Destral",
+  "craft_hammer": "Martell",
   "craft_chest": "Cofre",
   "chest_title": "Cofre",
   "inv_title": "Inventari",
