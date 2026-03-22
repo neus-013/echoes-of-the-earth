@@ -57,6 +57,7 @@ TILE_WILD_POTATO = 11
 TILE_WILD_WHEAT = 12
 TILE_WILD_PUMPKIN = 13
 TILE_DIRT = 14
+TILE_WATERED = 15  # NEW: Watered tilled tile
 
 BLOCKING_TILES = {
     TILE_TREE, TILE_ROCK, TILE_BERRY, TILE_CAMPFIRE,
@@ -110,10 +111,16 @@ EDIBLE_ITEMS = {
 }
 
 # ── Tool IDs ────────────────────────────────────────────────────
-TOOL_STONE = "stone_tool"
-TOOL_HOE = "hoe"
-TOOL_WATER_BUCKET = "water_bucket"
 
+# Tool IDs
+TOOL_STONE = "stone_tool"      # Pedra
+TOOL_HOE = "hoe"               # Aixada
+TOOL_WATER_BUCKET = "water_bucket"  # Cubell
+TOOL_WATER_BARREL = "water_barrel"  # Bóta
+TOOL_AXE = "axe"               # Destral
+TOOL_HAMMER = "hammer"         # Martell
+
+WATER_BARREL_CAPACITY = 10
 WATER_BUCKET_CAPACITY = 20
 HOLD_EXTRA_TILES = 2   # extra tiles when holding click (hoe / bucket)
 
@@ -212,6 +219,20 @@ CRAFTING_RECIPES = [
         "result_type": "tool",
         "ingredients": {ITEM_WOOD: 4, ITEM_STONE: 2},
         "name_key": "craft_water_bucket",
+    },
+    {
+        "id": "craft_axe",
+        "result": TOOL_AXE,
+        "result_type": "tool",
+        "ingredients": {ITEM_WOOD: 8, ITEM_STONE: 4},
+        "name_key": "craft_axe",
+    },
+    {
+        "id": "craft_hammer",
+        "result": TOOL_HAMMER,
+        "result_type": "tool",
+        "ingredients": {ITEM_WOOD: 4, ITEM_STONE: 8},
+        "name_key": "craft_hammer",
     },
     {
         "id": "craft_chest",

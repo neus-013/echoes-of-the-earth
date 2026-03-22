@@ -12,12 +12,13 @@ class Game:
         # Load translations
         load_language("ca")
 
-        # Display setup
+        # Display setup – borderless windowed fullscreen to avoid disrupting
+        # other windows' sizes / positions (unlike exclusive pygame.FULLSCREEN).
         screen_info = pygame.display.Info()
         self.screen_w = screen_info.current_w
         self.screen_h = screen_info.current_h
         self.screen = pygame.display.set_mode(
-            (self.screen_w, self.screen_h), pygame.FULLSCREEN
+            (self.screen_w, self.screen_h), pygame.NOFRAME
         )
         pygame.display.set_caption(GAME_TITLE)
 

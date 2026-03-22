@@ -1,22 +1,39 @@
+
 from src.settings import (
-    TOOL_STONE, TOOL_HOE, TOOL_WATER_BUCKET,
-    WATER_BUCKET_CAPACITY,
+    TOOL_STONE, TOOL_HOE, TOOL_WATER_BUCKET, TOOL_WATER_BARREL, TOOL_AXE, TOOL_HAMMER,
+    WATER_BUCKET_CAPACITY, WATER_BARREL_CAPACITY,
 )
 
 
 TOOL_INFO = {
-    TOOL_STONE: {"name_key": "tool_stone", "water": False},
-    TOOL_HOE: {"name_key": "tool_hoe", "water": False},
-    TOOL_WATER_BUCKET: {"name_key": "tool_water_bucket", "water": True, "capacity": WATER_BUCKET_CAPACITY},
+    TOOL_STONE: {"name_key": "tool_stone", "water": False, "break_tree_hits": 5, "break_rock_hits": 5, "till": 1},
+    TOOL_HOE: {"name_key": "tool_hoe", "water": False, "till": 3},
+    TOOL_WATER_BARREL: {"name_key": "tool_water_barrel", "water": True, "capacity": WATER_BARREL_CAPACITY, "water_tiles": 1},
+    TOOL_WATER_BUCKET: {"name_key": "tool_water_bucket", "water": True, "capacity": WATER_BUCKET_CAPACITY, "water_tiles": 3},
+    TOOL_AXE: {"name_key": "tool_axe", "water": False, "break_tree_hits": 3},
+    TOOL_HAMMER: {"name_key": "tool_hammer", "water": False, "break_rock_hits": 3},
 }
 
 
 class ToolManager:
+    def upgrade_barrel_to_bucket(self, inventory):
+        # Requereix 10 fusta i 5 pedra
+        WOOD_ID = "wood"
+        STONE_ID = "stone"
+        if WOOD_ID in inventory.items and inventory.items[WOOD_ID] >= 10 and STONE_ID in inventory.items and inventory.items[STONE_ID] >= 5:
+            inventory.items[WOOD_ID] -= 10
+            inventory.items[STONE_ID] -= 5
+            self.tools.remove(TOOL_WATER_BARREL)
+            self.tools.append(TOOL_WATER_BUCKET)
+            self.water[TOOL_WATER_BUCKET] = WATER_BUCKET_CAPACITY
+            return True
+        return False
     def __init__(self):
-        self.tools = [TOOL_STONE, TOOL_WATER_BUCKET]
+        # Start with only pedra and bóta
+        self.tools = [TOOL_STONE, TOOL_WATER_BARREL]
         self.selected = 0
         self.active = True   # True = tool in use; False = inventory selection active
-        self.water = {TOOL_WATER_BUCKET: WATER_BUCKET_CAPACITY}
+        self.water = {TOOL_WATER_BARREL: WATER_BARREL_CAPACITY}
 
     @property
     def current(self):

@@ -258,6 +258,7 @@ class CreateGameScreen:
                 "season": 0,
                 "year": 1,
                 "pg_total": 0,
+                "tools_data": {"tools": ["stone", "hoe", "water_barrel"], "water": {"water_barrel": 10}},
             }
             self.game.data = game_data
             from src.screens.playing import PlayingScreen
@@ -278,7 +279,7 @@ class CreateGameScreen:
                 "facing": FACING_DOWN,
                 "energy": 100,
                 "inventory": [],
-                "tools_data": None,
+                "tools_data": {"tools": ["stone", "water_barrel"], "water": {"water_barrel": 10}},
                 "planted_types": [],
             }
 

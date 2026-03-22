@@ -1,3 +1,4 @@
+
 import pygame
 from src.settings import (
     INTERNAL_WIDTH, INTERNAL_HEIGHT, TILE_SIZE,
@@ -5,7 +6,7 @@ from src.settings import (
     PLAYER_MAX_ENERGY, FACING_DOWN, FACING_UP, FACING_LEFT, FACING_RIGHT,
     TILE_GRASS, TILE_TREE, TILE_ROCK, TILE_BERRY, TILE_TILLED, TILE_CHEST,
     TILE_WATER, TILE_BED, TILE_DIRT, WILD_TILES,
-    TOOL_STONE, TOOL_HOE, TOOL_WATER_BUCKET,
+    TOOL_STONE, TOOL_HOE, TOOL_WATER_BUCKET, TOOL_HAMMER,
     ENERGY_COST_HIT, ENERGY_COST_PICK, ENERGY_COST_TILL_STONE, ENERGY_COST_TILL_HOE,
     ENERGY_COST_WATER, ENERGY_COST_PLANT, ENERGY_COST_HARVEST,
     HOLD_EXTRA_TILES, FACING_OFFSETS, ITEM_BERRIES, ITEM_CHEST, ITEM_WOOD, ITEM_STONE,
@@ -26,13 +27,23 @@ from src.systems.crafting import can_craft, do_craft
 
 
 class PlayingScreen:
+
+    def _handle_world_click(self, mx, my, event=None):
+        """Handle a click in world coordinates (tile actions, etc)."""
+        tx = int(mx // TILE_SIZE)
+        ty = int(my // TILE_SIZE)
+        self._do_tile_action(tx, ty, event)
+
+    def _to_internal(self, pos):
+        return self.game.screen_to_internal(pos[0], pos[1])
+
     def __init__(self, game):
         self.game = game
         self.world = World()
         self.time_system = TimeSystem()
         self.inventory = Inventory()
         self.tool_manager = ToolManager()
-        self.farming = FarmingSystem()
+        self.farming = FarmingSystem(world=self.world)
         self.hud = HUD()
         self.player = None
         self.daily_items = {}
@@ -47,6 +58,197 @@ class PlayingScreen:
         self.font_small = pygame.font.SysFont("arial", 14)
         self.font_tiny = pygame.font.SysFont("arial", 11)
 
+        # Interaction cooldown
+        self.interact_cooldown = 0.0
+
+        # Hold state (for bucket watering / hoe tilling adjacent tiles)
+        self.hold_info = None   # {"tx": int, "ty": int, "timer": float, "type": str, "done": bool}
+
+        # Overlay states
+        self.crafting_open = False
+        self.chest_open = False
+        self.chest_pos = None
+        self.pause_rects = []
+        self.sleep_rects = []
+        self.craft_rects = []
+        self.chest_slot_rects = []
+        self.chest_inv_rects = []
+
+        # ── Multiplayer state ──
+        self.is_multiplayer = False
+        self.is_host = False
+        self.local_player_id = 0
+        self.server = None   # Server (host only)
+        self.client = None   # Client (client only)
+        self.players = {}    # pid -> Player object
+        self.inventories = {}    # pid -> Inventory
+        self.tool_managers = {}  # pid -> ToolManager
+        self.planted_types_all = {}  # pid -> set
+        self.sleeping_players = set()  # pids currently sleeping
+        self.waiting_for_sleep = False  # True when local player is waiting for others to sleep
+        self.net_timer = 0.0
+        self.disconnected_msg = ""
+        self.user_ids = {}  # pid -> user_id (for saving)
+
+    def handle_event(self, event):
+        """Handle input events (keyboard, mouse, etc)."""
+        if self.waiting_for_sleep:
+            return
+        if self.chest_open:
+            self._handle_chest_event(event)
+            return
+        if self.crafting_open:
+            self._handle_crafting_event(event)
+            return
+        if event is None:
+            class DummyEvent:
+                type = None
+                button = None
+                dict = {}
+            event = DummyEvent()
+        if event.type == pygame.KEYDOWN:
+            if self.sleep_prompt:
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    self._go_to_sleep(passed_out=False)
+                elif event.key == pygame.K_ESCAPE:
+                    self.sleep_prompt = False
+                return
+            if self.paused:
+                if event.key in (pygame.K_UP, pygame.K_w):
+                    self.pause_selected = (self.pause_selected - 1) % 2
+                elif event.key in (pygame.K_DOWN, pygame.K_s):
+                    self.pause_selected = (self.pause_selected + 1) % 2
+                elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    if self.pause_selected == 0:
+                        self.paused = False
+                    else:
+                        self._exit_to_menu()
+                elif event.key == pygame.K_ESCAPE:
+                    self.paused = False
+                return
+            if event.key == pygame.K_ESCAPE:
+                self.paused = True
+                self.pause_selected = 0
+            elif event.key == pygame.K_TAB:
+                if self.tool_manager.active:
+                    self.tool_manager.cycle()
+                else:
+                    self.inventory.toggle_page()
+            elif event.key == pygame.K_q:
+                self._try_eat_selected()
+        elif event.type == pygame.MOUSEBUTTONDOWN:
+            mx, my = self._to_internal(event.pos)
+            if event.button == 1:
+                if self.sleep_prompt:
+                    for i, rect in enumerate(self.sleep_rects):
+                        if rect and rect.collidepoint(mx, my):
+                            if i == 0:
+                                self._go_to_sleep(passed_out=False)
+                            else:
+                                self.sleep_prompt = False
+                            break
+                    return
+                if self.paused:
+                    for i, rect in enumerate(self.pause_rects):
+                        if rect and rect.collidepoint(mx, my):
+                            self.pause_selected = i
+                            if i == 0:
+                                self.paused = False
+                            else:
+                                self._exit_to_menu()
+                            break
+                    return
+                if self.hud.tool_slot_rect and self.hud.tool_slot_rect.collidepoint(mx, my):
+                    self.tool_manager.active = True
+                    self.inventory.selected_slot = -1
+                    return
+                if self.hud.toolbar_rects:
+                    vis_start, _ = self.inventory.get_visible_range()
+                    for i, rect in enumerate(self.hud.toolbar_rects):
+                        if rect and rect.collidepoint(mx, my):
+                            abs_idx = vis_start + i
+                            if self.inventory.selected_slot == abs_idx:
+                                self.inventory.selected_slot = -1
+                            else:
+                                self.inventory.selected_slot = abs_idx
+                                self.tool_manager.active = False
+                            return
+                if self.hud.craft_button_rect and self.hud.craft_button_rect.collidepoint(mx, my):
+                    self.crafting_open = True
+                    return
+                if self.interact_cooldown <= 0:
+                    self._handle_world_click(mx, my, event)
+            elif event.button in (4, 5):
+                direction = -1 if event.button == 4 else 1
+                if self.tool_manager.active:
+                    self.tool_manager.cycle(direction)
+                else:
+                    self.inventory.toggle_page()
+        elif event.type == pygame.MOUSEBUTTONUP:
+            if event.button == 1:
+                self.hold_info = None
+        elif event.type == pygame.MOUSEMOTION:
+            if self.paused:
+                mx, my = self._to_internal(event.pos)
+                for i, rect in enumerate(self.pause_rects):
+                    if rect and rect.collidepoint(mx, my):
+                        self.pause_selected = i
+                        break
+
+    def on_enter(self, **kwargs):
+        data = self.game.data
+        mode = data.get("mode", "solo")
+        self.is_multiplayer = (mode == "multi")
+        self.is_host = data.get("is_host", True)
+        self.local_player_id = data.get("local_player_id", 0)
+        self.sleeping_players = set()
+        self.waiting_for_sleep = False
+        self.disconnected_msg = ""
+        self.net_timer = 0.0
+        if self.is_multiplayer:
+            self.server = data.get("server")
+            self.client = data.get("client")
+            num_players = data.get("num_players", 2)
+            self.world = World(num_players=num_players)
+            self.world.from_save_data(data.get("world_data"))
+            self.players = {}
+            self.inventories = {}
+            self.tool_managers = {}
+            self.planted_types_all = {}
+            self.user_ids = {}
+            for pdata in data.get("players", []):
+                pid = pdata["id"]
+                avatar = pdata.get("avatar", {"skin": 0, "hair_color": 0, "outfit": 0, "eyes": 0})
+                cx = pdata.get("cx", PLAYER_START_X)
+                cy = pdata.get("cy", PLAYER_START_Y)
+                p = Player(cx, cy, avatar, name=pdata.get("name", ""))
+                p.facing = pdata.get("facing", FACING_DOWN)
+                p.energy = pdata.get("energy", PLAYER_MAX_ENERGY)
+                self.players[pid] = p
+                self.user_ids[pid] = pdata.get("user_id", "")
+                inv = Inventory()
+                inv.from_list(pdata.get("inventory", []))
+                self.inventories[pid] = inv
+                tm = ToolManager()
+                tm.from_save_data(pdata.get("tools_data"))
+                self.tool_managers[pid] = tm
+            if self.players:
+                local_id = self.local_player_id if self.local_player_id in self.players else list(self.players.keys())[0]
+                self.player = self.players[local_id]
+                self.inventory = self.inventories[local_id]
+                self.tool_manager = self.tool_managers[local_id]
+        else:
+            avatar = data.get("avatar", {"skin": 0, "hair_color": 0, "outfit": 0, "eyes": 0})
+            name = data.get("player_name", "")
+            cx = data.get("player_cx", PLAYER_START_X)
+            cy = data.get("player_cy", PLAYER_START_Y)
+            self.player = Player(cx, cy, avatar, name=name)
+            self.player.facing = data.get("player_facing", FACING_DOWN)
+            self.player.energy = data.get("energy", PLAYER_MAX_ENERGY)
+            self.inventory = Inventory()
+            self.inventory.from_list(data.get("inventory", []))
+            self.tool_manager = ToolManager()
+            self.tool_manager.from_save_data(data.get("tools_data"))
         # Interaction cooldown
         self.interact_cooldown = 0.0
 
@@ -125,210 +327,218 @@ class PlayingScreen:
                 tm.from_save_data(pdata.get("tools_data"))
                 self.tool_managers[pid] = tm
 
-                self.planted_types_all[pid] = set(pdata.get("planted_types", []))
-
-            # Point self.player/inventory/tool_manager to local player
-            self.player = self.players.get(self.local_player_id)
-            self.inventory = self.inventories.get(self.local_player_id, Inventory())
-            self.tool_manager = self.tool_managers.get(self.local_player_id, ToolManager())
-            self.planted_types = self.planted_types_all.get(self.local_player_id, set())
+            # Set self.player, self.inventory, self.tool_manager for the local player
+            if self.players:
+                local_id = self.local_player_id if self.local_player_id in self.players else list(self.players.keys())[0]
+                self.player = self.players[local_id]
+                self.inventory = self.inventories[local_id]
+                self.tool_manager = self.tool_managers[local_id]
         else:
-            # Solo mode — original logic
+            # Solo mode: set up player, inventory, tool_manager from data
             avatar = data.get("avatar", {"skin": 0, "hair_color": 0, "outfit": 0, "eyes": 0})
+            name = data.get("player_name", "")
             cx = data.get("player_cx", PLAYER_START_X)
             cy = data.get("player_cy", PLAYER_START_Y)
-            self.player = Player(cx, cy, avatar)
+            self.player = Player(cx, cy, avatar, name=name)
             self.player.facing = data.get("player_facing", FACING_DOWN)
             self.player.energy = data.get("energy", PLAYER_MAX_ENERGY)
+            self.inventory = Inventory()
             self.inventory.from_list(data.get("inventory", []))
+            self.tool_manager = ToolManager()
             self.tool_manager.from_save_data(data.get("tools_data"))
-            self.world.from_save_data(data.get("world_data"))
-            self.players = {}
-            self.server = None
-            self.client = None
-
-        self.farming.from_save_data(data.get("farming_data"))
-        if not self.is_multiplayer:
-            self.planted_types = set(data.get("planted_types", []))
-
-        # Re-apply tilled tiles for plots that have crops
-        for (tx, ty) in self.farming.plots:
-            if self.world.get_tile(tx, ty) != TILE_TILLED:
-                self.world.set_tile(tx, ty, TILE_TILLED)
-
-        self.time_system.reset_day()
-        self.daily_items = {}
-        self.daily_pg = 0
-        self.paused = False
-        self.sleep_prompt = False
-        self.crafting_open = False
-        self.chest_open = False
-        self.hold_info = None
-
-    def _to_internal(self, pos):
-        return self.game.screen_to_internal(pos[0], pos[1])
-
-    # ── EVENT HANDLING ──────────────────────────────────────────────
-    def handle_event(self, event):
-        # Disconnected overlay: any key/click exits to menu
-        if self.disconnected_msg:
-            if event.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
-                self._exit_to_menu()
-            return
 
         # Block all input while waiting for others to sleep
         if self.waiting_for_sleep:
             return
-
-        # Route to active overlay first
-        if self.chest_open:
-            self._handle_chest_event(event)
-            return
-        if self.crafting_open:
-            self._handle_crafting_event(event)
-            return
-
-        if event.type == pygame.KEYDOWN:
-            if self.sleep_prompt:
-                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                    self._go_to_sleep(passed_out=False)
-                elif event.key == pygame.K_ESCAPE:
-                    self.sleep_prompt = False
+            # Block all input while waiting for others to sleep
+            if self.waiting_for_sleep:
                 return
 
-            if self.paused:
-                if event.key in (pygame.K_UP, pygame.K_w):
-                    self.pause_selected = (self.pause_selected - 1) % 2
-                elif event.key in (pygame.K_DOWN, pygame.K_s):
-                    self.pause_selected = (self.pause_selected + 1) % 2
-                elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                    if self.pause_selected == 0:
-                        self.paused = False
-                    else:
-                        self._exit_to_menu()
-                elif event.key == pygame.K_ESCAPE:
-                    self.paused = False
+            # Route to active overlay first
+            if self.chest_open:
+                self._handle_chest_event(event)
+                return
+            if self.crafting_open:
+                self._handle_crafting_event(event)
                 return
 
-            # Normal gameplay input
-            if event.key == pygame.K_ESCAPE:
-                self.paused = True
-                self.pause_selected = 0
-            elif event.key == pygame.K_TAB:
-                if self.tool_manager.active:
-                    self.tool_manager.cycle()
-                else:
-                    self.inventory.toggle_page()
-            elif event.key == pygame.K_q:
-                self._try_eat_selected()
+            # Ensure event is defined for input handling
+            if event is None:
+                class DummyEvent:
+                    type = None
+                    button = None
+                    dict = {}
+                event = DummyEvent()
 
-        elif event.type == pygame.MOUSEBUTTONDOWN:
-            mx, my = self._to_internal(event.pos)
-
-            if event.button == 1:  # Left click
+            if event.type == pygame.KEYDOWN:
                 if self.sleep_prompt:
-                    for i, rect in enumerate(self.sleep_rects):
-                        if rect and rect.collidepoint(mx, my):
-                            if i == 0:
-                                self._go_to_sleep(passed_out=False)
-                            else:
-                                self.sleep_prompt = False
-                            break
+                    if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        self._go_to_sleep(passed_out=False)
+                    elif event.key == pygame.K_ESCAPE:
+                        self.sleep_prompt = False
                     return
 
                 if self.paused:
+                    if event.key in (pygame.K_UP, pygame.K_w):
+                        self.pause_selected = (self.pause_selected - 1) % 2
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        self.pause_selected = (self.pause_selected + 1) % 2
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if self.pause_selected == 0:
+                            self.paused = False
+                        else:
+                            self._exit_to_menu()
+                    elif event.key == pygame.K_ESCAPE:
+                        self.paused = False
+                    return
+
+                # Normal gameplay input
+                if event.key == pygame.K_ESCAPE:
+                    self.paused = True
+                    self.pause_selected = 0
+                elif event.key == pygame.K_TAB:
+                    if self.tool_manager.active:
+                        self.tool_manager.cycle()
+                    else:
+                        self.inventory.toggle_page()
+                elif event.key == pygame.K_q:
+                    self._try_eat_selected()
+
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                mx, my = self._to_internal(event.pos)
+
+                if event.button == 1:  # Left click
+                    if self.sleep_prompt:
+                        for i, rect in enumerate(self.sleep_rects):
+                            if rect and rect.collidepoint(mx, my):
+                                if i == 0:
+                                    self._go_to_sleep(passed_out=False)
+                                else:
+                                    self.sleep_prompt = False
+                                break
+                        return
+
+                    if self.paused:
+                        for i, rect in enumerate(self.pause_rects):
+                            if rect and rect.collidepoint(mx, my):
+                                self.pause_selected = i
+                                if i == 0:
+                                    self.paused = False
+                                else:
+                                    self._exit_to_menu()
+                                break
+                        return
+
+                    # Check tool slot click
+                    if self.hud.tool_slot_rect and self.hud.tool_slot_rect.collidepoint(mx, my):
+                        self.tool_manager.active = True
+                        self.inventory.selected_slot = -1
+                        return
+
+                    # Check toolbar slot clicks
+                    if self.hud.toolbar_rects:
+                        vis_start, _ = self.inventory.get_visible_range()
+                        for i, rect in enumerate(self.hud.toolbar_rects):
+                            if rect and rect.collidepoint(mx, my):
+                                abs_idx = vis_start + i
+                                if self.inventory.selected_slot == abs_idx:
+                                    self.inventory.selected_slot = -1  # deselect
+                                else:
+                                    self.inventory.selected_slot = abs_idx
+                                    self.tool_manager.active = False
+                                return
+
+                    # Check craft button
+                    if self.hud.craft_button_rect and self.hud.craft_button_rect.collidepoint(mx, my):
+                        self.crafting_open = True
+                        return
+
+                    # Gameplay left-click
+                    if self.interact_cooldown <= 0:
+                        self._handle_world_click(mx, my, event)
+
+                elif event.button in (4, 5):  # Scroll wheel
+                    direction = -1 if event.button == 4 else 1
+                    if self.tool_manager.active:
+                        self.tool_manager.cycle(direction)
+                    else:
+                        self.inventory.toggle_page()
+
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    self.hold_info = None
+
+            elif event.type == pygame.MOUSEMOTION:
+                if self.paused:
+                    mx, my = self._to_internal(event.pos)
                     for i, rect in enumerate(self.pause_rects):
                         if rect and rect.collidepoint(mx, my):
                             self.pause_selected = i
-                            if i == 0:
-                                self.paused = False
-                            else:
-                                self._exit_to_menu()
                             break
-                    return
-
-                # Check tool slot click
-                if self.hud.tool_slot_rect and self.hud.tool_slot_rect.collidepoint(mx, my):
-                    self.tool_manager.active = True
-                    self.inventory.selected_slot = -1
-                    return
-
-                # Check toolbar slot clicks
-                if self.hud.toolbar_rects:
-                    vis_start, _ = self.inventory.get_visible_range()
-                    for i, rect in enumerate(self.hud.toolbar_rects):
-                        if rect and rect.collidepoint(mx, my):
-                            abs_idx = vis_start + i
-                            if self.inventory.selected_slot == abs_idx:
-                                self.inventory.selected_slot = -1  # deselect
-                            else:
-                                self.inventory.selected_slot = abs_idx
-                                self.tool_manager.active = False
-                            return
-
-                # Check craft button
-                if self.hud.craft_button_rect and self.hud.craft_button_rect.collidepoint(mx, my):
-                    self.crafting_open = True
-                    return
-
-                # Gameplay left-click
-                if self.interact_cooldown <= 0:
-                    self._handle_world_click(mx, my)
-
-            elif event.button in (4, 5):  # Scroll wheel
-                direction = -1 if event.button == 4 else 1
-                if self.tool_manager.active:
-                    self.tool_manager.cycle(direction)
                 else:
-                    self.inventory.toggle_page()
+                    # Gameplay mouse motion (no event passed)
+                    mx, my = self._to_internal(event.pos)
+                    self._handle_world_click(mx, my, event=None)
 
-        elif event.type == pygame.MOUSEBUTTONUP:
-            if event.button == 1:
-                self.hold_info = None
+        def __init__(self, game):
+            self.game = game
+            self.world = World()
+            self.time_system = TimeSystem()
+            self.inventory = Inventory()
+            self.tool_manager = ToolManager()
+            self.farming = FarmingSystem(world=self.world)
+            self.hud = HUD()
+            self.player = None
+            self.daily_items = {}
+            self.daily_pg = 0
+            self.planted_types = set()   # crop types planted at least once (for first-plant PG)
 
-        elif event.type == pygame.MOUSEMOTION:
-            if self.paused:
-                mx, my = self._to_internal(event.pos)
-                for i, rect in enumerate(self.pause_rects):
-                    if rect and rect.collidepoint(mx, my):
-                        self.pause_selected = i
-                        break
+            # Sub-states
+            self.paused = False
+            self.sleep_prompt = False
+            self.pause_selected = 0
+            self.font = pygame.font.SysFont("arial", 16)
+            self.font_small = pygame.font.SysFont("arial", 14)
+            self.font_tiny = pygame.font.SysFont("arial", 11)
 
-    # ── WORLD CLICK ─────────────────────────────────────────────────
-    def _handle_world_click(self, mx, my):
-        cam = self.world.camera
-        wx = mx + cam.x
-        wy = my + cam.y
-        tx = int(wx // TILE_SIZE)
-        ty = int(wy // TILE_SIZE)
+            # Interaction cooldown
+            self.interact_cooldown = 0.0
 
-        px, py = self.player.tile_x, self.player.tile_y
-        dx = tx - px
-        dy = ty - py
+            # Hold state (for bucket watering / hoe tilling adjacent tiles)
+            self.hold_info = None   # {"tx": int, "ty": int, "timer": float, "type": str, "done": bool}
 
-        # Must be adjacent (including diagonals) or the player's own tile
-        if abs(dx) > 1 or abs(dy) > 1:
-            return
+            # Overlay states
+            self.crafting_open = False
+            self.chest_open = False
+            self.chest_pos = None
+            self.pause_rects = []
+            self.sleep_rects = []
+            self.craft_rects = []
+            self.chest_slot_rects = []
+            self.chest_inv_rects = []
 
-        # Face toward clicked tile (skip if clicking own tile)
-        if dx != 0 or dy != 0:
-            if abs(dx) >= abs(dy):
-                self.player.facing = FACING_RIGHT if dx > 0 else FACING_LEFT
-            else:
-                self.player.facing = FACING_DOWN if dy > 0 else FACING_UP
+            # ── Multiplayer state ──
+            self.is_multiplayer = False
+            self.is_host = False
+            self.local_player_id = 0
+            self.server = None   # Server (host only)
+            self.client = None   # Client (client only)
+            self.players = {}    # pid -> Player object
+            self.inventories = {}    # pid -> Inventory
+            self.tool_managers = {}  # pid -> ToolManager
+            self.planted_types_all = {}  # pid -> set
+            self.sleeping_players = set()  # pids currently sleeping
+            self.waiting_for_sleep = False  # True when local player is waiting for others to sleep
 
-        self._do_tile_action(tx, ty)
-        self.interact_cooldown = 0.25
 
-        # In multiplayer, send action to server for sync
-        if self.is_multiplayer and not self.is_host and self.client:
-            self.client.send({
-                "type": "action", "action": "tile_action",
-                "tx": tx, "ty": ty,
-            })
-
-    def _do_tile_action(self, tx, ty):
+    def _do_tile_action(self, tx, ty, event=None):
         """Main interaction dispatch based on current tool + target tile."""
+        if event is None:
+            class DummyEvent:
+                type = None
+                button = None
+                dict = {}
+            event = DummyEvent()
         if tx < 0 or ty < 0 or tx >= MAP_WIDTH or ty >= MAP_HEIGHT:
             return
 
@@ -404,7 +614,7 @@ class PlayingScreen:
                         self.hud.add_message(t("msg_water_full"), 1.0)
                     return
 
-                # Water any tilled soil (with or without crop)
+                # Water tilled soil
                 if tile == TILE_TILLED:
                     if self.tool_manager.get_water() <= 0:
                         self.hud.add_message(t("msg_water_empty"), 1.5)
@@ -412,245 +622,37 @@ class PlayingScreen:
                     if self.player.energy < ENERGY_COST_WATER:
                         self.hud.add_message(t("msg_no_energy"), 2.0)
                         return
-                    self.farming.water(tx, ty)
-                    self.tool_manager.use_water()
-                    self.player.energy -= ENERGY_COST_WATER
-                    self.hud.add_message(t("msg_watered"), 1.0)
-                    # Start hold timer for direction-based adjacent watering
-                    self.hold_info = {"tx": tx, "ty": ty, "timer": 0.0, "type": "water", "done": False}
-                    return
-
-                # Click any other tile with bucket → waste 1 water
-                if self.tool_manager.get_water() > 0:
-                    self.tool_manager.use_water()
-                    self.hud.add_message(t("msg_water_wasted"), 1.0)
-                else:
-                    self.hud.add_message(t("msg_water_empty"), 1.5)
-                return
-
-        # ── Generic interactions (work regardless of tool/inventory) ──
-        # Harvest mature crop
-        if tile == TILE_TILLED and self.farming.is_mature(tx, ty):
-            if self.player.energy < ENERGY_COST_HARVEST:
-                self.hud.add_message(t("msg_no_energy"), 2.0)
-                return
-            result = self.farming.harvest(tx, ty)
-            if result:
-                item_id, qty, quality, pg = result
-                if not self.inventory.can_add(item_id, quality):
-                    self.hud.add_message(t("msg_inventory_full"), 2.0)
-                    return
-                self.inventory.add_item(item_id, qty, quality)
-                self.player.energy -= ENERGY_COST_HARVEST
-                item_name = t(f"item_{item_id}")
-                q_text = f" ({t('quality_good')})" if quality > 0 else ""
-                self.hud.add_message(f"+{qty} {item_name}{q_text}", 1.5)
-                self.daily_items[item_id] = self.daily_items.get(item_id, 0) + qty
-                self.daily_pg += pg
-                if (tx, ty) not in self.farming.plots:
-                    pass  # stays TILE_TILLED
-            return
-
-        # Plant seed on empty tilled soil (from selected inventory slot)
-        if tile == TILE_TILLED and not self.farming.get_crop(tx, ty):
-            selected = self.inventory.get_selected_item()
-            if selected and selected["item"] in ALL_SEED_ITEMS:
-                if self.player.energy < ENERGY_COST_PLANT:
-                    self.hud.add_message(t("msg_no_energy"), 2.0)
-                    return
-                self._plant_seed(tx, ty, selected["item"])
-                # Clear selection if slot is now empty
-                if self.inventory.get_selected_item() is None:
-                    self.inventory.selected_slot = -1
-            else:
-                self.hud.add_message(t("msg_need_seeds"), 1.5)
-            return
-
-        # Berry bush
-        if tile == TILE_BERRY and (tx, ty) not in self.world.harvested:
-            if self.player.energy < ENERGY_COST_PICK:
-                self.hud.add_message(t("msg_no_energy"), 2.0)
-                return
-            result = self.world.hit_resource(tx, ty)
-            if result:
-                item_id, qty, _ = result
-                if self.inventory.can_add(item_id):
-                    self.inventory.add_item(item_id, qty)
-                    self.player.energy -= ENERGY_COST_PICK
-                    item_name = t(f"item_{item_id}")
-                    self.hud.add_message(f"+{qty} {item_name}", 1.5)
-                    self.daily_items[item_id] = self.daily_items.get(item_id, 0) + qty
-                else:
-                    self.hud.add_message(t("msg_inventory_full"), 2.0)
-            return
-
-        # Wild crop harvest
-        if tile in WILD_TILES and (tx, ty) not in self.world.harvested:
-            if self.player.energy < ENERGY_COST_PICK:
-                self.hud.add_message(t("msg_no_energy"), 2.0)
-                return
-            result = self.world.harvest_wild(tx, ty)
-            if result:
-                seed_item, qty = result
-                if self.inventory.can_add(seed_item):
-                    self.inventory.add_item(seed_item, qty)
-                    self.player.energy -= ENERGY_COST_PICK
-                    item_name = t(f"item_{seed_item}")
-                    self.hud.add_message(f"+{qty} {item_name}", 1.5)
-                    self.daily_items[seed_item] = self.daily_items.get(seed_item, 0) + qty
-                else:
-                    self.hud.add_message(t("msg_inventory_full"), 2.0)
-            return
-
-        # Place chest
-        if tile == TILE_GRASS and self.inventory.count_item(ITEM_CHEST) > 0:
-            if self.world.place_chest(tx, ty):
-                self.inventory.remove_item(ITEM_CHEST, 1)
-                self.hud.add_message(t("msg_chest_placed"), 1.5)
-            return
-
-    def _plant_seed(self, tx, ty, seed_item):
-        crop_id = SEED_TO_CROP.get(seed_item)
-        if not crop_id:
-            return
-        if self.farming.plant(tx, ty, seed_item):
-            self.inventory.remove_item(seed_item, 1)
-            self.player.energy -= ENERGY_COST_PLANT
-            crop_name = t(CROPS[crop_id]["name_key"])
-            self.hud.add_message(f"{t('msg_planted')} {crop_name}", 1.5)
-            # First-plant PG bonus
-            if crop_id not in self.planted_types:
-                self.planted_types.add(crop_id)
-                self.daily_pg += PG_FIRST_PLANT
-                self.hud.add_message(f"+{PG_FIRST_PLANT} PG!", 2.0)
-
-    def _try_eat_selected(self):
-        """Try to eat the item in the selected inventory slot."""
-        selected = self.inventory.get_selected_item()
-        if not selected:
-            return
-        item_id = selected["item"]
-        restore = EDIBLE_ITEMS.get(item_id)
-        if restore is None:
-            self.hud.add_message(t("msg_cant_eat"), 1.0)
-            return
-        if self.player.eat_food(self.inventory, item_id, restore):
-            item_name = t(f"item_{item_id}")
-            self.hud.add_message(f"+{item_name} → {t('hud_energy')}", 1.5)
-            # Clear selection if slot is now empty
-            if self.inventory.get_selected_item() is None:
-                self.inventory.selected_slot = -1
-
-    def _hold_extra_hoe(self, tx, ty):
-        """Till up to HOLD_EXTRA_TILES tiles ahead in facing direction."""
-        fdx, fdy = FACING_OFFSETS[self.player.facing]
-        tilled = 0
-        for step in range(1, HOLD_EXTRA_TILES + 1):
-            ntx, nty = tx + fdx * step, ty + fdy * step
-            if (self.world.get_tile(ntx, nty) == TILE_DIRT
-                    and self.player.energy >= ENERGY_COST_TILL_HOE):
-                if self.world.till_soil(ntx, nty):
-                    self.player.energy -= ENERGY_COST_TILL_HOE
-                    tilled += 1
-        if tilled > 0:
-            self.hud.add_message(t("msg_tilled"), 1.0)
-
-    def _hold_extra_water(self, tx, ty):
-        """Water up to HOLD_EXTRA_TILES adjacent tiles perpendicular to facing direction."""
-        facing = self.player.facing
-        # Up/Down → water horizontally (left, right)
-        # Left/Right → water vertically (up, down)
-        if facing in (FACING_UP, FACING_DOWN):
-            offsets = [(-1, 0), (1, 0)]
-        else:
-            offsets = [(0, -1), (0, 1)]
-        watered = 0
-        for odx, ody in offsets:
-            if watered >= HOLD_EXTRA_TILES:
-                break
-            ntx, nty = tx + odx, ty + ody
-            if (self.world.get_tile(ntx, nty) == TILE_TILLED
-                    and self.tool_manager.get_water() > 0):
-                self.farming.water(ntx, nty)
-                self.tool_manager.use_water()
-                watered += 1
-        if watered > 0:
-            self.hud.add_message(t("msg_watered"), 1.0)
-
-    # ── CRAFTING OVERLAY ────────────────────────────────────────────
-    def _handle_crafting_event(self, event):
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-            self.crafting_open = False
-            return
-        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            mx, my = self._to_internal(event.pos)
-            for i, rect in enumerate(self.craft_rects):
-                if rect and rect.collidepoint(mx, my):
-                    recipe = CRAFTING_RECIPES[i]
-                    if can_craft(recipe, self.inventory):
-                        if do_craft(recipe, self.inventory, self.tool_manager):
-                            name = t(recipe["name_key"])
-                            self.hud.add_message(f"{t('msg_crafted')} {name}", 2.0)
+                    if self.world.water_soil(tx, ty):
+                        self.tool_manager.use_water()
+                        self.player.energy -= ENERGY_COST_WATER
+                        self.hud.add_message(t("msg_watered"), 1.0)
+                        return
                     else:
-                        self.hud.add_message(t("msg_cant_craft"), 1.5)
+                        self.hud.add_message(t("msg_water_empty"), 1.5)
+                        return
+
+            # Martell
+            if tool == TOOL_HAMMER:
+                if tile == TILE_ROCK:
+                    if self.player.energy < ENERGY_COST_HIT:
+                        self.hud.add_message(t("msg_no_energy"), 2.0)
+                        return
+                    result = self.world.hit_resource(tx, ty, tool_id=tool)
+                    self.player.energy -= ENERGY_COST_HIT
+                    self.player.flash_timer = 0.1
+                    if result:
+                        item_id, qty, _ = result
+                        if self.inventory.can_add(item_id):
+                            self.inventory.add_item(item_id, qty)
+                            item_name = t(f"item_{item_id}")
+                            self.hud.add_message(f"+{qty} {item_name}", 1.5)
+                            self.daily_items[item_id] = self.daily_items.get(item_id, 0) + qty
+                        else:
+                            self.hud.add_message(t("msg_inventory_full"), 2.0)
+                    else:
+                        hp = self.world.get_resource_hp(tx, ty)
+                        self.hud.add_message(f"({hp})", 0.5)
                     return
-            # Click outside panel = close
-            self.crafting_open = False
-
-    def _draw_crafting(self, surface):
-        pw, ph = 220, 30 + len(CRAFTING_RECIPES) * 48
-        px = (INTERNAL_WIDTH - pw) // 2
-        py = (INTERNAL_HEIGHT - ph) // 2
-
-        overlay = pygame.Surface((INTERNAL_WIDTH, INTERNAL_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 100))
-        surface.blit(overlay, (0, 0))
-
-        pygame.draw.rect(surface, COL_UI_BG, (px, py, pw, ph))
-        pygame.draw.rect(surface, COL_UI_SELECTED, (px, py, pw, ph), 1)
-
-        draw_text(surface, t("craft_title"), px + pw // 2, py + 8, self.font_small,
-                  COL_UI_HIGHLIGHT, center=True)
-
-        self.craft_rects = []
-        for i, recipe in enumerate(CRAFTING_RECIPES):
-            ry = py + 26 + i * 48
-            rect = pygame.Rect(px + 6, ry, pw - 12, 44)
-            self.craft_rects.append(rect)
-
-            # Tool already owned check
-            already_owned = (
-                recipe["result_type"] == "tool"
-                and self.tool_manager.has_tool(recipe["result"])
-            )
-            craftable = can_craft(recipe, self.inventory) and not already_owned
-            bg_col = (55, 45, 32) if craftable else (40, 32, 24)
-            pygame.draw.rect(surface, bg_col, rect)
-            border_col = COL_UI_HIGHLIGHT if craftable else (80, 70, 60)
-            pygame.draw.rect(surface, border_col, rect, 1)
-
-            # Recipe name
-            name = t(recipe["name_key"])
-            draw_text(surface, name, px + 12, ry + 4, self.font_tiny, COL_UI_TEXT)
-
-            # Ingredients
-            ing_texts = []
-            for item_id, needed in recipe["ingredients"].items():
-                have = self.inventory.count_item(item_id)
-                iname = t(f"item_{item_id}")
-                col = (120, 200, 100) if have >= needed else (200, 80, 65)
-                ing_texts.append((f"{iname}: {have}/{needed}", col))
-
-            ix = px + 12
-            for txt, col in ing_texts:
-                ts = self.font_tiny.render(txt, False, col)
-                surface.blit(ts, (ix, ry + 18))
-                ix += ts.get_width() + 10
-
-            # Craft button label
-            if craftable:
-                draw_text(surface, t("craft_do"), px + pw - 50, ry + 30, self.font_tiny,
-                          COL_UI_HIGHLIGHT)
 
     # ── CHEST OVERLAY ───────────────────────────────────────────────
     def _handle_chest_event(self, event):
@@ -1023,7 +1025,7 @@ class PlayingScreen:
             self.tool_manager = self.tool_managers[slot_id]
             self.planted_types = self.planted_types_all.get(slot_id, set())
 
-            self._do_tile_action(tx, ty)
+            self._do_tile_action(tx, ty, event=None)
 
             # Restore context
             self.player = old_p

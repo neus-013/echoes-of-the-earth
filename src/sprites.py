@@ -1,3 +1,4 @@
+import json
 import pygame
 import math
 import random
@@ -62,6 +63,26 @@ def _soft_circle(surf, cx, cy, r, col, rng, jitter=1):
         px_y = cy + rr * math.sin(a)
         _px(surf, int(px_x), int(px_y), col)
     pygame.draw.circle(surf, col, (int(cx), int(cy)), max(1, int(r) - 1))
+
+
+_ASSETS_TILES = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tiles")
+
+
+def _load_tile_sheet(png_name, json_name, scale_to_tile=True):
+    """Load an Aseprite-exported sprite sheet and return list of Surfaces. Optionally scale to TILE_SIZE."""
+    png_path = os.path.join(_ASSETS_TILES, png_name)
+    json_path = os.path.join(_ASSETS_TILES, json_name)
+    sheet = pygame.image.load(png_path).convert_alpha()
+    with open(json_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    frames = []
+    for frame_data in meta["frames"].values():
+        r = frame_data["frame"]
+        surf = sheet.subsurface(pygame.Rect(r["x"], r["y"], r["w"], r["h"])).copy()
+        if scale_to_tile and (surf.get_width() != T or surf.get_height() != T):
+            surf = pygame.transform.scale(surf, (T, T))
+        frames.append(surf)
+    return frames
 
 
 # ── grass ──────────────────────────────────────────────────────────
@@ -684,56 +705,29 @@ def create_tile_sprites():
 
     tiles = {}
 
-    # Grass variants
-    for i in range(20):
-        tiles[f"grass_{i}"] = _draw_grass(i * 7 + 3)
+    # Grass variants (from sprite sheet)
+    grass_frames = _load_tile_sheet("herba.png", "herba.json")
+    for i, frame in enumerate(grass_frames):
+        tiles[f"grass_{i}"] = frame
 
-    # Dirt variants
-    for i in range(8):
-        tiles[f"dirt_{i}"] = _draw_dirt(i * 11 + 5)
+    # Dirt variants (from sprite sheet)
+    dirt_frames = _load_tile_sheet("terra.png", "terra.json")
+    for i, frame in enumerate(dirt_frames):
+        tiles[f"dirt_{i}"] = frame
 
-    # Tree (full + damage states)
-    tiles["tree"] = _draw_tree(0)
-    for hp in range(1, 4):
-        damage = 4 - hp
-        tiles[f"tree_{hp}"] = _draw_tree(damage)
+    # Tree sprites (new PNG/JSON assets)
+    tree_frames = _load_tile_sheet("arbre.png", "arbre.json", scale_to_tile=False)
+    tiles["tree"] = tree_frames[0]  # sencer
+    tiles["tree_1"] = tree_frames[1]  # danyat
+    tiles["tree_2"] = tree_frames[2]  # soca
+    # If you have a fourth frame for stump, add: tiles["tree_empty"] = tree_frames[3]
 
-    # Tree stump
-    stump = pygame.Surface((T, T), pygame.SRCALPHA)
-    rng = random.Random(42)
-    trunk = COL_TREE_TRUNK
-    pygame.draw.ellipse(stump, (58, 80, 35, 60), (8, 24, 18, 6))
-    pygame.draw.rect(stump, trunk, (11, 20, 10, 10))
-    pygame.draw.rect(stump, COL_TREE_TRUNK_HI, (12, 20, 4, 10))
-    pygame.draw.rect(stump, COL_TREE_TRUNK_LO, (18, 20, 2, 10))
-    pygame.draw.ellipse(stump, _shade(trunk, 18), (10, 18, 12, 6))
-    pygame.draw.ellipse(stump, _shade(trunk, 28), (12, 19, 8, 4), 1)
-    pygame.draw.circle(stump, _shade(trunk, 35), (16, 21), 2, 1)
-    _px(stump, 16, 21, _shade(trunk, -5))
-    for by in range(22, 28, 2):
-        _px(stump, 11, by, COL_TREE_TRUNK_LO)
-        _px(stump, 20, by, COL_TREE_TRUNK_LO)
-    for mx, my in [(12, 25), (13, 26), (11, 27)]:
-        _px(stump, mx, my, (72, 115, 48))
-    tiles["tree_empty"] = stump
-
-    # Rock (full + damage states)
-    tiles["rock"] = _draw_rock(0)
-    for hp in range(1, 4):
-        damage = 4 - hp
-        tiles[f"rock_{hp}"] = _draw_rock(damage)
-
-    # Rock rubble (empty)
-    rubble = pygame.Surface((T, T), pygame.SRCALPHA)
-    rubble_rng = random.Random(78)
-    pygame.draw.ellipse(rubble, (80, 75, 58, 40), (5, 23, 22, 6))
-    for rx, ry, rr in [(11, 24, 3), (20, 25, 2), (15, 26, 2), (24, 25, 2)]:
-        col = _shade(COL_ROCK_WARM, rubble_rng.randint(-12, 8))
-        pygame.draw.circle(rubble, col, (rx, ry), rr)
-        _px(rubble, rx - 1, ry - 1, _shade(col, 15))
-    for px_x, py in [(8, 26), (18, 27), (22, 26)]:
-        _px(rubble, px_x, py, COL_ROCK_SHADOW)
-    tiles["rock_empty"] = rubble
+    # Rock sprites (new PNG/JSON assets)
+    rock_frames = _load_tile_sheet("pedra.png", "pedra.json")
+    tiles["rock"] = rock_frames[0]  # sencer
+    tiles["rock_1"] = rock_frames[1]  # danyat
+    tiles["rock_2"] = rock_frames[2]  # runa
+    # If you have a fourth frame for rubble, add: tiles["rock_empty"] = rock_frames[3]
 
     # Berry bush
     tiles["berry"] = _draw_berry_bush(True)
@@ -745,17 +739,40 @@ def create_tile_sprites():
     # Bed
     tiles["bed"] = _draw_bed()
 
-    # Water variants
-    for i in range(4):
-        tiles[f"water_{i}"] = _draw_water(i * 13 + 5)
+    # Water (from sprite sheet)
+    water_frames = _load_tile_sheet("aigua.png", "aigua.json")
+    for i, frame in enumerate(water_frames):
+        tiles[f"water_{i}"] = frame
 
     # Border variants
     for i in range(4):
         tiles[f"border_{i}"] = _draw_border(i * 17 + 3)
 
-    # ── Tilled soil ──
-    tiles["tilled"] = _draw_tilled(False)
-    tiles["tilled_watered"] = _draw_tilled(True)
+    # ── Tilled soil (from sprite sheet) ──
+    tilled_frames = _load_tile_sheet("terra-llaurada.png", "terra-llaurada.json")
+    tiles["tilled"] = tilled_frames[0]
+    # 'terra-mullada': utilitza el PNG personalitzat
+    terra_mullada_frames = _load_tile_sheet("terra-mullada.png", "terra-llaurada.json")
+    # Flower sprites (from sprite sheet)
+    flower_frames = _load_tile_sheet("flowers.png", "flowers.json")
+    for i, frame in enumerate(flower_frames):
+        tiles[f"flower_{i+1}"] = frame
+    tiles["terra-mullada"] = terra_mullada_frames[0]
+    from src.settings import TILE_WATERED
+    tiles[TILE_WATERED] = terra_mullada_frames[0]  # Associate TILE_WATERED with terra-mullada.png
+
+    # 'tilled_watered': igual que terra-mullada (plots regats)
+    tilled_watered = tilled_frames[0].copy()
+    for x in range(T):
+        for y in range(T):
+            c = tilled_watered.get_at((x, y))
+            if c.a > 0:
+                if (x + y) % 2 == 0:
+                    r, g, b = 255, 120, 200  # Rosa
+                else:
+                    r, g, b = 180, 90, 255   # Lila
+                tilled_watered.set_at((x, y), pygame.Color(r, g, b, c.a))
+    tiles["tilled_watered"] = tilled_watered
 
     # ── Chest ──
     tiles["chest"] = _draw_chest()

@@ -8,13 +8,13 @@ Guia de tots els sprites i elements gràfics del joc. Consulta aquest fitxer per
 
 ## 1. Terreny (32×32 px per tile)
 
-| Sprite sheet     | Frames                                 | Estat         | Notes                                                               |
-| ---------------- | -------------------------------------- | ------------- | ------------------------------------------------------------------- |
-| Herba            | 4-6 variants                           | ❌ Procedural | Base de tot el mapa, el que més es repeteix                         |
-| Terra            | 4-8 variants                           | ❌ Procedural | Zona llaurable (marró/terrosa), única superfície que es pot llaurar |
-| Aigua            | 4 variants (o animada: 4 frames × 2-3) | ❌ Procedural | Riu i llac, pot ser animada                                         |
-| Vora / bosc dens | 4 variants                             | ❌ Procedural | Límit del mapa                                                      |
-| Terra llaurada   | 2 (seca + regada)                      | ❌ Procedural | Parcel·les de cultiu                                                |
+| Sprite sheet     | Frames            | Estat         | Notes                                                             |
+| ---------------- | ----------------- | ------------- | ----------------------------------------------------------------- |
+| Herba            | 1 variant         | ✅ Fet        | `assets/tiles/herba.png` — 16×16, 1 frame (escalat a 32×32)       |
+| Terra            | 1 variant         | ✅ Fet        | `assets/tiles/terra.png` — 16×16, 1 frame (escalat a 32×32)       |
+| Aigua            | 1 variant         | ✅ Fet        | `assets/tiles/aigua.png` — 1 frame carregat                       |
+| Vora / bosc dens | 4 variants        | ❌ Procedural | Límit del mapa                                                    |
+| Terra llaurada   | 1 (+ fosc regada) | ✅ Fet        | `assets/tiles/terra-llaurada.png` — 1 frame + enfosquiment regada |
 
 ---
 

@@ -7,11 +7,12 @@ from src.settings import (
 class FarmingSystem:
     """Manages planted crops and growth logic."""
 
-    def __init__(self):
+    def __init__(self, world=None):
         # {(tx, ty): {"crop": crop_id, "day": int, "watered": bool}}
         self.plots = {}
         # Tracks how many times each crop type has been harvested (for quality)
         self.harvest_counts = {}
+        self.world = world
 
     def plant(self, tx, ty, seed_item):
         crop_id = SEED_TO_CROP.get(seed_item)
@@ -22,12 +23,6 @@ class FarmingSystem:
         self.plots[(tx, ty)] = {"crop": crop_id, "day": 0, "watered": False}
         return True
 
-    def water(self, tx, ty):
-        plot = self.plots.get((tx, ty))
-        if plot and not plot["watered"]:
-            plot["watered"] = True
-            return True
-        return False
 
     def is_watered(self, tx, ty):
         plot = self.plots.get((tx, ty))
@@ -97,14 +92,18 @@ class FarmingSystem:
         return (item_id, qty, quality, pg)
 
     def advance_day(self):
-        """Called at the start of a new day. Watered crops grow, unwatered don't."""
+        """Només creixen les plantes en terra mullada."""
+        from src.settings import TILE_TILLED, TILE_WATERED
         for pos, plot in list(self.plots.items()):
             if plot["watered"]:
                 plot["day"] += 1
-                # Clear regrowing flag once the crop starts growing again
                 plot.pop("regrowing", None)
-            # Reset watered status for next day
+            # Reset watered status for next day and revert tile to TILE_TILLED
             plot["watered"] = False
+            if self.world:
+                # Only revert if tile is TILE_WATERED
+                if self.world.get_tile(pos[0], pos[1]) == TILE_WATERED:
+                    self.world.set_tile(pos[0], pos[1], TILE_TILLED)
 
     def to_save_data(self):
         plots_data = {}
