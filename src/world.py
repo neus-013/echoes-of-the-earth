@@ -95,11 +95,10 @@ def generate_map(seed=2024, num_players=1):
             if 1 <= dx2 < MAP_WIDTH - 1 and 1 <= dy2 < MAP_HEIGHT - 1:
                 tilemap[dy2][dx2] = TILE_DIRT
 
-    # 6) Campfire + beds around it
+    # 6) Campfire + beds
     center_x = MAP_WIDTH // 2
     center_y = MAP_HEIGHT // 2
     tilemap[center_y][center_x] = TILE_CAMPFIRE
-
     for i in range(num_players):
         bx, by = BED_POSITIONS[i]
         tilemap[by][bx] = TILE_BED
@@ -107,12 +106,11 @@ def generate_map(seed=2024, num_players=1):
     return tilemap
 
 
-# Pre-computed flower probability table to avoid per-frame Random() construction
+# Pre-computed flower table (evita crear Random per cada tile cada frame)
 _FLOWER_TABLE = {}
 
 
 def _build_flower_table():
-    """Pre-compute which tiles have flowers and which variant."""
     for ty in range(MAP_HEIGHT):
         for tx in range(MAP_WIDTH):
             rng = random.Random(tx * 1000 + ty * 10000)
@@ -133,21 +131,25 @@ class World:
         self.resource_hp = {}
         self.harvested = set()
         self.chests = {}
+        # Recursos acabats de destruir que mostren frame final durant un moment
+        # {(tx,ty): {"type": "tree"|"rock", "timer": float}}
+        self._dying = {}
         self._init_resources()
 
     def _init_resources(self):
         for ty in range(MAP_HEIGHT):
             for tx in range(MAP_WIDTH):
-                tile = self.base_map[ty][tx]
-                if tile in (TILE_TREE, TILE_ROCK):
+                if self.base_map[ty][tx] in (TILE_TREE, TILE_ROCK):
                     self.resource_hp[(tx, ty)] = RESOURCE_HP
 
     def new_day(self):
-        """Respawn trees/rocks/berries/wild crops for the new day."""
         self.tilemap = [row[:] for row in self.base_map]
         self.resource_hp.clear()
         self.harvested.clear()
+        self._dying.clear()
         self._init_resources()
+
+    # ── Consultes ────────────────────────────────────────────────
 
     def is_blocking(self, tx, ty):
         if tx < 0 or ty < 0 or tx >= MAP_WIDTH or ty >= MAP_HEIGHT:
@@ -172,19 +174,21 @@ class World:
         return (FARM_ORIGIN_X <= tx < FARM_ORIGIN_X + FARM_WIDTH and
                 FARM_ORIGIN_Y <= ty < FARM_ORIGIN_Y + FARM_HEIGHT)
 
+    # ── Agricultura ──────────────────────────────────────────────
+
     def till_soil(self, tx, ty):
-        """Convert dirt to tilled soil. Returns True if successful."""
         if self.tilemap[ty][tx] != TILE_DIRT:
             return False
         self.tilemap[ty][tx] = TILE_TILLED
         return True
 
     def water_soil(self, tx, ty):
-        """Convert tilled soil to watered soil. Returns True if successful."""
         if self.tilemap[ty][tx] != TILE_TILLED:
             return False
         self.tilemap[ty][tx] = TILE_WATERED
         return True
+
+    # ── Cofres ───────────────────────────────────────────────────
 
     def place_chest(self, tx, ty):
         if self.tilemap[ty][tx] != TILE_GRASS:
@@ -196,8 +200,9 @@ class World:
     def get_chest(self, tx, ty):
         return self.chests.get((tx, ty))
 
+    # ── Recursos ─────────────────────────────────────────────────
+
     def harvest_wild(self, tx, ty):
-        """Harvest a wild crop tile. Returns (seed_item, qty) or None."""
         tile = self.tilemap[ty][tx]
         if tile not in WILD_TILES or (tx, ty) in self.harvested:
             return None
@@ -212,7 +217,16 @@ class World:
         return (crop_info["seed"], crop_info["seed_yield"])
 
     def hit_resource(self, tx, ty, tool_id=None):
-        """Hit a resource. Returns (item_id, qty, depleted) or None."""
+        """
+        Colpeja un recurs. Retorna (item_id, qty, True) si s'ha destruït,
+        o None si encara queda HP.
+
+        HP inicial = RESOURCE_HP (4).
+        Cada eina té el seu max_hp (cops necessaris):
+          - pedra afilada: 5 cops (però HP inicial és 4, així que efectivament 4)
+          - destral/martell: 3 cops
+        Si max_hp < HP actual, el reseteja (eina millor = menys cops).
+        """
         from src.settings import (
             ITEM_WOOD, ITEM_STONE, ITEM_BERRIES,
             YIELD_WOOD, YIELD_STONE, YIELD_BERRIES,
@@ -221,37 +235,59 @@ class World:
 
         tile = self.tilemap[ty][tx]
 
+        # Baies
         if tile == TILE_BERRY and (tx, ty) not in self.harvested:
             self.harvested.add((tx, ty))
             return (ITEM_BERRIES, YIELD_BERRIES, True)
 
-        if tile in (TILE_TREE, TILE_ROCK):
-            key = (tx, ty)
-            if key not in self.resource_hp:
-                return None
-            info = TOOL_INFO.get(tool_id, {})
-            if tile == TILE_TREE:
-                max_hp = info.get("break_tree_hits", 5)
-            else:
-                max_hp = info.get("break_rock_hits", 5)
-
-            if self.resource_hp[key] > max_hp:
-                self.resource_hp[key] = max_hp
-            self.resource_hp[key] -= 1
-
-            if self.resource_hp[key] <= 0:
-                self.harvested.add(key)
-                del self.resource_hp[key]
-                item = ITEM_WOOD if tile == TILE_TREE else ITEM_STONE
-                qty = YIELD_WOOD if tile == TILE_TREE else YIELD_STONE
-                self.tilemap[ty][tx] = TILE_GRASS
-                return (item, qty, True)
+        if tile not in (TILE_TREE, TILE_ROCK):
             return None
+
+        key = (tx, ty)
+        if key not in self.resource_hp:
+            return None
+
+        # Llegir cops necessaris de TOOL_INFO — pot ser None si l'eina no pot
+        info = TOOL_INFO.get(tool_id, {})
+        if tile == TILE_TREE:
+            max_hp = info.get("break_tree_hits")
+        else:
+            max_hp = info.get("break_rock_hits")
+
+        # Si l'eina no té la capacitat, no hauria d'arribar aquí
+        # (playing.py ja ho filtra), però defensivament retornem None
+        if max_hp is None:
+            return None
+
+        # Si l'eina és millor que l'actual HP, ajustem el HP
+        if self.resource_hp[key] > max_hp:
+            self.resource_hp[key] = max_hp
+
+        self.resource_hp[key] -= 1
+
+        if self.resource_hp[key] <= 0:
+            # Destruït: guardar estat "dying" per mostrar frame final 0.4s
+            resource_type = "tree" if tile == TILE_TREE else "rock"
+            self._dying[key] = {"type": resource_type, "timer": 0.4}
+            self.harvested.add(key)
+            del self.resource_hp[key]
+            self.tilemap[ty][tx] = TILE_GRASS
+            item = ITEM_WOOD if tile == TILE_TREE else ITEM_STONE
+            qty = YIELD_WOOD if tile == TILE_TREE else YIELD_STONE
+            return (item, qty, True)
 
         return None
 
     def get_resource_hp(self, tx, ty):
         return self.resource_hp.get((tx, ty), 0)
+
+    def update(self, dt):
+        """Actualitza timers d'animació de destrucció."""
+        for v in self._dying.values():
+            v["timer"] -= dt
+        expired = [k for k, v in self._dying.items() if v["timer"] <= 0]
+        for k in expired:
+            del self._dying[k]
 
     def is_campfire(self, tx, ty):
         return self.get_tile(tx, ty) == TILE_CAMPFIRE
@@ -262,30 +298,25 @@ class World:
     # ── Serialització ────────────────────────────────────────────
 
     def to_save_data(self):
-        """Serialize persistent world state (tilled/watered tiles, chests, removed wilds)."""
-        tilled = []
-        watered = []
-        removed_wilds = []
-
+        tilled, removed_wilds = [], []
         for ty in range(MAP_HEIGHT):
             for tx in range(MAP_WIDTH):
                 curr = self.tilemap[ty][tx]
                 orig = self.base_map[ty][tx]
-                if curr == TILE_TILLED:
+                # Les tiles regades (TILE_WATERED) es guarden com a tilled —
+                # al carregar apareixeran seques, com correspon a un nou dia.
+                if curr in (TILE_TILLED, TILE_WATERED):
                     tilled.append([tx, ty])
-                elif curr == TILE_WATERED:
-                    watered.append([tx, ty])
                 if orig in WILD_TILES and curr == TILE_GRASS:
                     removed_wilds.append([tx, ty])
 
-        chests_data = {}
-        for (tx, ty), slots in self.chests.items():
-            chests_data[f"{tx},{ty}"] = [s.copy() if s else None for s in slots]
-
+        chests_data = {
+            f"{tx},{ty}": [s.copy() if s else None for s in slots]
+            for (tx, ty), slots in self.chests.items()
+        }
         return {
-            "tilled": tilled,
-            "watered": watered,
-            "chests": chests_data,
+            "tilled":        tilled,
+            "chests":        chests_data,
             "removed_wilds": removed_wilds,
         }
 
@@ -297,15 +328,12 @@ class World:
         self.tilemap = [row[:] for row in self.base_map]
         self.resource_hp.clear()
         self.harvested.clear()
+        self._dying.clear()
         self._init_resources()
 
         for tx, ty in data.get("tilled", []):
             if 0 <= tx < MAP_WIDTH and 0 <= ty < MAP_HEIGHT:
                 self.tilemap[ty][tx] = TILE_TILLED
-
-        for tx, ty in data.get("watered", []):
-            if 0 <= tx < MAP_WIDTH and 0 <= ty < MAP_HEIGHT:
-                self.tilemap[ty][tx] = TILE_WATERED
 
         self.chests.clear()
         for key, slots in data.get("chests", {}).items():
@@ -319,6 +347,32 @@ class World:
                 self.tilemap[ty][tx] = TILE_GRASS
 
     # ── Render ───────────────────────────────────────────────────
+
+    def _tree_frame_key(self, tx, ty):
+        """
+        3 frames: tree (sencer), tree_1 (danyat), tree_2 (soca).
+        RESOURCE_HP = 4 cops per defecte.
+        - hp >= ceil(max_hp * 2/3) → sencer
+        - hp >= 1                  → danyat
+        - hp == 0 / dying          → soca
+        """
+        hp = self.resource_hp.get((tx, ty), 0)
+        if hp >= 3:
+            return "tree"
+        if hp >= 1:
+            return "tree_1"
+        return "tree_2"
+
+    def _rock_frame_key(self, tx, ty):
+        """
+        3 frames: rock (sencera), rock_1 (danyada), rock_2 (runa).
+        """
+        hp = self.resource_hp.get((tx, ty), 0)
+        if hp >= 3:
+            return "rock"
+        if hp >= 1:
+            return "rock_1"
+        return "rock_2"
 
     def draw(self, surface, farming_system=None):
         cam = self.camera
@@ -335,10 +389,9 @@ class World:
                 tile = self.tilemap[ty][tx]
                 original = self.base_map[ty][tx]
 
-                # ── Watered soil (render before anything else) ──
+                # ── Terra mullada ────────────────────────────────
                 if tile == TILE_WATERED:
                     surface.blit(sprites[TILE_WATERED], (sx, sy))
-                    # Draw crop on top if present
                     if farming_system:
                         crop = farming_system.get_crop(tx, ty)
                         if crop:
@@ -348,34 +401,38 @@ class World:
                                 surface.blit(sprites[crop_key], (sx, sy))
                     continue
 
-                # ── Ground base layer ──
+                # ── Capa base de terra ───────────────────────────
                 if tile == TILE_DIRT or original == TILE_DIRT:
                     surface.blit(sprites["dirt_0"], (sx, sy))
                 else:
                     surface.blit(sprites["grass_0"], (sx, sy))
                     flower_idx = _FLOWER_TABLE.get((tx, ty))
                     if flower_idx:
-                        flower_sprite = sprites.get(f"flower_{flower_idx}")
-                        if flower_sprite:
-                            fw = flower_sprite.get_width()
-                            fh = flower_sprite.get_height()
-                            surface.blit(flower_sprite,
-                                         (sx + (TILE_SIZE - fw) // 2,
-                                          sy + (TILE_SIZE - fh) // 2))
+                        fs = sprites.get(f"flower_{flower_idx}")
+                        if fs:
+                            surface.blit(fs, (sx + (TILE_SIZE - fs.get_width()) // 2,
+                                              sy + (TILE_SIZE - fs.get_height()) // 2))
 
-                # ── Objects ──
+                # ── Objectes ─────────────────────────────────────
                 if tile == TILE_TREE:
-                    hp = self.resource_hp.get((tx, ty), 5)
-                    key = "tree" if hp >= 4 else ("tree_1" if hp >= 2 else "tree_2")
-                    tree_sprite = sprites[key]
-                    tw, th = tree_sprite.get_size()
-                    surface.blit(tree_sprite,
-                                 (sx + (TILE_SIZE - tw) // 2, sy + TILE_SIZE - th))
+                    key = self._tree_frame_key(tx, ty)
+                    ts = sprites[key]
+                    surface.blit(ts, (sx + (TILE_SIZE - ts.get_width()) // 2,
+                                      sy + TILE_SIZE - ts.get_height()))
 
                 elif tile == TILE_ROCK:
-                    hp = self.resource_hp.get((tx, ty), 5)
-                    key = "rock" if hp >= 4 else ("rock_1" if hp >= 2 else "rock_2")
-                    surface.blit(sprites[key], (sx, sy))
+                    surface.blit(sprites[self._rock_frame_key(tx, ty)], (sx, sy))
+
+                elif tile == TILE_GRASS:
+                    # Pot ser un recurs acabat de destruir (dying) — mostrem frame final
+                    dying = self._dying.get((tx, ty))
+                    if dying:
+                        if dying["type"] == "tree":
+                            ts = sprites["tree_2"]
+                            surface.blit(ts, (sx + (TILE_SIZE - ts.get_width()) // 2,
+                                              sy + TILE_SIZE - ts.get_height()))
+                        else:
+                            surface.blit(sprites["rock_2"], (sx, sy))
 
                 elif tile == TILE_BERRY or original == TILE_BERRY:
                     key = "berry_empty" if (tx, ty) in self.harvested else "berry"

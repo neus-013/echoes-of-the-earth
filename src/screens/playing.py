@@ -4,7 +4,7 @@ from src.settings import (
     COL_BG, COL_UI_TEXT, COL_UI_HIGHLIGHT, COL_UI_BG, COL_UI_SELECTED,
     PLAYER_MAX_ENERGY, FACING_DOWN, FACING_OFFSETS,
     TILE_GRASS, TILE_TREE, TILE_ROCK, TILE_BERRY, TILE_TILLED, TILE_CHEST,
-    TILE_WATER, TILE_BED, TILE_DIRT, TILE_WATERED, WILD_TILES,
+    TILE_WATER, TILE_BED, TILE_DIRT, TILE_WATERED, TILE_BORDER, WILD_TILES,
     TOOL_STONE, TOOL_HOE, TOOL_WATER_BUCKET, TOOL_WATER_BARREL,
     TOOL_AXE, TOOL_HAMMER,
     ENERGY_COST_HIT, ENERGY_COST_PICK, ENERGY_COST_TILL_STONE, ENERGY_COST_TILL_HOE,
@@ -26,15 +26,14 @@ from src.systems.farming import FarmingSystem
 from src.systems.crafting import can_craft, do_craft
 
 # Rang màxim d'acció en tiles (distància Chebyshev jugador → tile clicat)
-_ACTION_RANGE = 2
-
+# 3 tiles = 96px, còmode per clicar recursos adjacents sense estar a sobre
+_ACTION_RANGE = 3
 
 def _in_range(player, tx, ty):
     """Retorna True si el tile (tx,ty) està dins del rang d'acció del jugador."""
     dx = abs(player.tile_x - tx)
     dy = abs(player.tile_y - ty)
     return max(dx, dy) <= _ACTION_RANGE
-
 
 class PlayingScreen:
 
@@ -308,8 +307,10 @@ class PlayingScreen:
         return self.game.screen_to_internal(pos[0], pos[1])
 
     def _handle_world_click(self, mx, my):
-        tx = int(mx // TILE_SIZE)
-        ty = int(my // TILE_SIZE)
+        cam = self.world.camera
+        tx = int((mx + cam.x) // TILE_SIZE)
+        ty = int((my + cam.y) // TILE_SIZE)
+        tile = self.world.get_tile(tx, ty)
         self._do_tile_action(tx, ty)
 
     # ── Accions sobre tiles ──────────────────────────────────────
@@ -339,19 +340,29 @@ class PlayingScreen:
             self._try_harvest_wild(tx, ty)
             return
 
-        # ── Terra llaurada: plantar o collir ─────────────────────
+        # ── Terra llaurada: regar, plantar o collir ─────────────────
 
         if tile in (TILE_TILLED, TILE_WATERED):
+            tool = self.tool_manager.current
+            # Prioritat 1: si porta eina d'aigua → regar
+            if self.tool_manager.is_water_tool(tool):
+                self.tool_manager.active = True
+                self.inventory.selected_slot = -1
+                self._action_water(tool, tile, tx, ty)
+                return
+            # Prioritat 2: collir si madur
             if self.farming.is_mature(tx, ty):
                 self._try_harvest_crop(tx, ty)
-            else:
-                self._try_plant_on_tile(tx, ty)
+                return
+            # Prioritat 3: plantar
+            self._try_plant_on_tile(tx, ty)
             return
 
         # ── Accions amb eina activa ──────────────────────────────
 
-        if not self.tool_manager.active:
-            return
+        # Clicar al món sempre activa l'eina (desselecciona inventari)
+        self.tool_manager.active = True
+        self.inventory.selected_slot = -1
 
         tool = self.tool_manager.current
 
@@ -439,8 +450,6 @@ class PlayingScreen:
     # ── Eines de cop (pedra, destral, martell) ───────────────────
 
     def _action_hit(self, tool, tile, tx, ty):
-        """Gestiona cops d'eines. Comprova capacitats i dona feedback si no pot."""
-
         # Arbre
         if tile == TILE_TREE:
             if not self.tool_manager.can_break_tree(tool):
@@ -529,7 +538,7 @@ class PlayingScreen:
     # ── Eines d'aigua ────────────────────────────────────────────
 
     def _action_water(self, tool, tile, tx, ty):
-        # Omplir al riu
+        # Omplir al riu (no gasta res)
         if tile == TILE_WATER:
             filled = self.tool_manager.fill_water(tool)
             self.hud.add_message(
@@ -537,39 +546,53 @@ class PlayingScreen:
             )
             return
 
-        # Regar terra llaurada
+        # Sense aigua no pot fer res
+        if self.tool_manager.get_water(tool) <= 0:
+            self.hud.add_message(t("msg_water_empty"), 1.5)
+            return
+
+        # Sense energia no pot fer res
+        if self.player.energy < ENERGY_COST_WATER:
+            self.hud.add_message(t("msg_no_energy"), 2.0)
+            return
+
+        # Gastar sempre aigua i energia
+        self.tool_manager.use_water(tool_id=tool)
+        self.player.energy -= ENERGY_COST_WATER
+
         if tile == TILE_TILLED:
-            if self.tool_manager.get_water(tool) <= 0:
-                self.hud.add_message(t("msg_water_empty"), 1.5)
-                return
-            if self.player.energy < ENERGY_COST_WATER:
-                self.hud.add_message(t("msg_no_energy"), 2.0)
-                return
-            self._do_water_tile(tool, tx, ty)
-            # Inicia hold per regar tiles addicionals si la galleda ho permet
+            self.world.water_soil(tx, ty)
+            plot = self.farming.get_crop(tx, ty)
+            if plot:
+                plot["watered"] = True
+            self.hud.add_message(t("msg_watered"), 1.0)
+            # Hold per regar tiles addicionals amb la galleda
             if self.tool_manager.get_water_tiles(tool) > 1:
                 self.hold_info = {
                     "tx": tx, "ty": ty,
                     "timer": 0.0, "type": "water", "done": False,
                     "tool": tool,
                 }
-            return
-
-        # Feedback si cliques res útil
-        if tile not in (TILE_GRASS, TILE_DIRT, TILE_BORDER):
-            self.hud.add_message(t("msg_wrong_tool"), 1.5)
+        elif tile == TILE_WATERED:
+            # Ja regada: l'aigua es llenca silenciosament
+            pass
+        else:
+            # Tile no regable: l'aigua es llenca
+            self.hud.add_message(t("msg_water_wasted"), 1.0)
 
     def _do_water_tile(self, tool, tx, ty):
-        """Rega un tile concret i marca el cultiu com a regat."""
-        if self.world.water_soil(tx, ty):
-            self.tool_manager.use_water(tool_id=tool)
-            self.player.energy -= ENERGY_COST_WATER
+        """Rega un tile addicional (hold multi-tile). Gasta aigua i energia si en queda."""
+        if self.tool_manager.get_water(tool) <= 0:
+            return
+        if self.player.energy < ENERGY_COST_WATER:
+            return
+        self.tool_manager.use_water(tool_id=tool)
+        self.player.energy -= ENERGY_COST_WATER
+        if self.world.get_tile(tx, ty) == TILE_TILLED:
+            self.world.water_soil(tx, ty)
             plot = self.farming.get_crop(tx, ty)
             if plot:
                 plot["watered"] = True
-            self.hud.add_message(t("msg_watered"), 1.0)
-
-    # ── Hold: llaurar / regar tiles addicionals ──────────────────
 
     def _update_hold(self, dt):
         if not self.hold_info or self.hold_info["done"]:
@@ -936,6 +959,7 @@ class PlayingScreen:
         keys = pygame.key.get_pressed()
         self.player.handle_input(keys, dt, self.world)
         self.player.update(dt)
+        self.world.update(dt)
         self.world.camera.follow(self.player.cx, self.player.cy)
         self.hud.update(dt)
 
