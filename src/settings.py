@@ -16,9 +16,9 @@ HOURS_PER_DAY = DAY_END_HOUR - DAY_START_HOUR  # 20 in-game hours
 # Player
 PLAYER_SPEED = 120  # pixels per second
 PLAYER_MAX_ENERGY = 100
-ENERGY_COST_HIT = 5
-ENERGY_COST_PICK = 2
-ENERGY_BERRY_RESTORE = 15
+ENERGY_COST_HIT = 1
+ENERGY_COST_PICK = 0.5
+ENERGY_BERRY_RESTORE = 8
 RESOURCE_HP = 4  # hits to break tree/rock
 PLAYER_HITBOX_W = 14
 PLAYER_HITBOX_H = 10
@@ -57,7 +57,7 @@ TILE_WILD_POTATO = 11
 TILE_WILD_WHEAT = 12
 TILE_WILD_PUMPKIN = 13
 TILE_DIRT = 14
-TILE_WATERED = 15  # NEW: Watered tilled tile
+TILE_WATERED = 15
 
 BLOCKING_TILES = {
     TILE_TREE, TILE_ROCK, TILE_BERRY, TILE_CAMPFIRE,
@@ -103,16 +103,14 @@ ALL_SEED_ITEMS = {ITEM_SEED_MORA, ITEM_SEED_POTATO, ITEM_SEED_WHEAT, ITEM_SEED_P
 
 # Edible items: item_id → energy restored
 EDIBLE_ITEMS = {
-    ITEM_BERRIES: 15,
-    ITEM_MORA: 20,
-    ITEM_POTATO: 25,
-    ITEM_WHEAT: 10,
-    ITEM_PUMPKIN: 30,
+    ITEM_BERRIES: 8,
+    ITEM_MORA: 10,
+    ITEM_POTATO: 12,
+    ITEM_WHEAT: 5,
+    ITEM_PUMPKIN: 15,
 }
 
 # ── Tool IDs ────────────────────────────────────────────────────
-
-# Tool IDs
 TOOL_STONE = "stone_tool"      # Pedra
 TOOL_HOE = "hoe"               # Aixada
 TOOL_WATER_BUCKET = "water_bucket"  # Cubell
@@ -125,11 +123,11 @@ WATER_BUCKET_CAPACITY = 20
 HOLD_EXTRA_TILES = 2   # extra tiles when holding click (hoe / bucket)
 
 # ── Energy costs (farming) ──────────────────────────────────────
-ENERGY_COST_TILL_STONE = 3
+ENERGY_COST_TILL_STONE = 2
 ENERGY_COST_TILL_HOE = 1
 ENERGY_COST_WATER = 1
-ENERGY_COST_PLANT = 1
-ENERGY_COST_HARVEST = 1
+ENERGY_COST_PLANT = 0.5
+ENERGY_COST_HARVEST = 0.5
 
 # ── Crop definitions ────────────────────────────────────────────
 CROP_MORA = "mora"
@@ -360,7 +358,6 @@ DISCOVERY_PORT = 7778  # UDP port for game code discovery
 NET_TICK_RATE = 20  # state updates per second from server
 
 # Bed positions around the campfire (relative to MAP center)
-# campfire is at (center_x, center_y); beds surround it
 _CX = MAP_WIDTH // 2
 _CY = MAP_HEIGHT // 2
 BED_POSITIONS = [
